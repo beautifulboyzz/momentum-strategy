@@ -252,7 +252,7 @@ def run_strategy_logic(df_prices, df_vols, df_lows, params):
 # ================= 4. UI 页面 =================
 
 with st.sidebar:
-    st.header("⚡ Dual Momentum")
+    st.header("Dual Momentum")
     
     st.caption(f"当前数据源: `{DEFAULT_DATA_FOLDER}`")
     data_folder = st.text_input("数据路径", value=DEFAULT_DATA_FOLDER)
@@ -328,7 +328,7 @@ if run_btn:
             k3.metric("最大回撤", f"{max_dd * 100:.2f}%", delta_color="inverse")
             k4.metric("夏普比率", f"{sharpe:.2f}")
 
-            tab_chart, tab_attr, tab_log = st.tabs(["📈 曲线", "📊 归因 (Treemap)", "📝 日志"])
+            tab_chart, tab_attr, tab_log = st.tabs(["📈 曲线", "📊 盈亏", "📝 日志"])
 
             with tab_chart:
                 fig = go.Figure()
@@ -376,3 +376,4 @@ if run_btn:
                 st.text_area("交易明细", "\n".join(res_logs), height=500)
 else:
     st.info(f"👈 请点击【运行策略】")
+
