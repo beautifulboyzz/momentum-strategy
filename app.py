@@ -293,7 +293,7 @@ with st.sidebar:
     run_btn = st.button("⚡ 运行策略", type="primary", use_container_width=True)
 
 # 主界面逻辑
-st.title("⚡ Fast Dual Momentum 策略回测")
+st.title("Dual Momentum 策略回测")
 
 if run_btn:
     # 1. 加载数据 (含 Low)
@@ -415,3 +415,4 @@ else:
     if os.path.exists(data_folder):
         files_count = len([f for f in os.listdir(data_folder) if f.endswith('.csv')])
         st.write(f"检测到数据目录：`{data_folder}` (包含 {files_count} 个文件)")
+
