@@ -8,7 +8,7 @@ import unicodedata
 from datetime import datetime, timedelta
 
 # ================= 1. 系统配置 =================
-st.set_page_config(page_title="Dual Momentum回测系统", layout="wide", page_icon="⚡")
+st.set_page_config(page_title="Dual Momentum回测系统", layout="wide", page_icon="")
 
 # --- 路径自动适配逻辑 ---
 local_absolute_path = r"D:\SAR日频\全部品种日线"
@@ -340,3 +340,4 @@ if run_btn:
                 st.text_area("交易明细", "\n".join(res_logs), height=500)
 else:
     st.info(f"👈 请点击【运行策略】")
+
