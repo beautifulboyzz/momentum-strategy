@@ -8,7 +8,7 @@ import unicodedata
 from datetime import datetime, timedelta
 
 # ================= 1. 系统配置 =================
-st.set_page_config(page_title="Dual Momentum回测系统", layout="wide", page_icon="")
+st.set_page_config(page_title="Dual Momentum回测系统", layout="wide", page_icon="⚡")
 
 # --- 路径自动适配逻辑 ---
 local_absolute_path = r"D:\SAR日频\全部品种日线"
@@ -252,7 +252,7 @@ def run_strategy_logic(df_prices, df_vols, df_lows, params):
 # ================= 4. UI 页面 =================
 
 with st.sidebar:
-    st.header("⚡ Dual Momentum")
+    st.header("Dual Momentum")
     
     # 简单的路径显示，不再显示复杂的环境诊断
     st.caption(f"当前数据源: `{DEFAULT_DATA_FOLDER}`")
