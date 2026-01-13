@@ -7,7 +7,7 @@ import plotly.graph_objects as go
 from datetime import datetime, timedelta
 
 # ================= 1. 系统配置 =================
-st.set_page_config(page_title="Fast Dual Momentum (极速版) 回测系统", layout="wide", page_icon="⚡")
+st.set_page_config(page_title="Dual Momentum回测系统", layout="wide", page_icon="⚡")
 
 # 默认路径配置
 DEFAULT_DATA_FOLDER = r"D:\SAR日频\全部品种日线"
@@ -265,13 +265,13 @@ def run_strategy_logic(df_prices, df_vols, df_lows, params):
 # ================= 4. UI 页面 =================
 
 with st.sidebar:
-    st.header("⚡ 极速双重动量配置")
+    st.header("⚡ 双重动量配置")
 
     # 路径设置
     data_folder = st.text_input("数据文件夹路径", value=DEFAULT_DATA_FOLDER)
     st.divider()
 
-    # 参数设置 - 默认值设为代码2中的极速版参数
+    # 参数设置 - 默认值设为代码2中的版参数
     st.subheader("🗓️ 核心参数")
 
     col_d1, col_d2 = st.columns(2)
@@ -290,7 +290,7 @@ with st.sidebar:
         filter_ma = st.number_input("均线过滤 (MA)", value=60)
         atr_window = st.number_input("ATR周期", value=20)
 
-    run_btn = st.button("⚡ 运行极速策略", type="primary", use_container_width=True)
+    run_btn = st.button("⚡ 运行策略", type="primary", use_container_width=True)
 
 # 主界面逻辑
 st.title("⚡ Fast Dual Momentum 策略回测")
@@ -411,7 +411,7 @@ if run_btn:
                 st.text_area("Log Output", log_text, height=600)
 
 else:
-    st.info("👈 请在左侧设置路径并点击【运行极速策略】")
+    st.info("👈 请在左侧设置路径并点击【运行策略】")
     if os.path.exists(data_folder):
         files_count = len([f for f in os.listdir(data_folder) if f.endswith('.csv')])
         st.write(f"检测到数据目录：`{data_folder}` (包含 {files_count} 个文件)")
