@@ -349,7 +349,7 @@ if run_btn:
                         color='Contribution',  # 板块颜色 = 真实盈亏
                         color_continuous_scale=['#22c55e', '#ffffff', '#ef4444'],  # 绿-白-红 (符合A股习惯)
                         color_continuous_midpoint=0,
-                        title='<b>品种盈亏贡献分布 (面积=影响力, 颜色=红盈绿亏)</b>'
+                        title='<b>品种盈亏贡献分布</b>'
                     )
                     fig_tree.update_traces(textinfo="label+text")
                     fig_tree.update_layout(margin=dict(t=50, l=10, r=10, b=10))
@@ -378,4 +378,5 @@ if run_btn:
                 st.text_area("交易明细", "\n".join(res_logs), height=500)
 else:
     st.info(f"👈 请点击【运行策略】")
+
 
