@@ -58,20 +58,20 @@ def load_data_and_calc_atr(folder, atr_window=20):
 
     # 【核心保留】必须排序
     files = sorted([f for f in os.listdir(folder) if f.endswith('.csv')])
-    
+
     if not files:
         return None, None, None, f"在 {folder} 中未找到CSV文件"
 
     price_dict = {}
     vol_dict = {}
     low_dict = {}
-    
+
     progress_bar = st.progress(0, text="正在加载数据...")
 
     for i, file in enumerate(files):
         # 【核心保留】文件名标准化
         file_norm = unicodedata.normalize('NFC', file)
-        
+
         # 剔除逻辑
         if "纤维板" in file_norm or "胶合板" in file_norm or "线材" in file_norm:
             continue
@@ -86,10 +86,10 @@ def load_data_and_calc_atr(folder, atr_window=20):
             df['date'] = pd.to_datetime(df['date'], errors='coerce')
             df.dropna(subset=['date', 'close', 'high', 'low'], inplace=True)
             df['date'] = df['date'].dt.normalize()
-            
+
             # 【核心保留】再次排序
             df.sort_values('date', inplace=True)
-            
+
             # 去重
             df = df[~df.index.duplicated(keep='last')]
             df.set_index('date', inplace=True)
@@ -131,7 +131,7 @@ def load_data_and_calc_atr(folder, atr_window=20):
 
 def run_strategy_logic(df_prices, df_vols, df_lows, params):
     """
-    核心策略逻辑
+    核心策略逻辑 (增强日志版)
     """
     lookback_short = params['short']
     lookback_long = params['long']
@@ -170,9 +170,10 @@ def run_strategy_logic(df_prices, df_vols, df_lows, params):
     weights = {}
     curr_holdings = {}
     entry_prices = {}
-    log_buffer_pnl = []
+
+    # 修改：使用 cycle_details 列表来存储一个周期内的详细信息
+    cycle_details = []
     cycle_count = 1
-    log_start_date = full_dates[start_idx_loc]
 
     # --- C. 按日循环 ---
     for i in range(start_idx_loc, len(full_dates)):
@@ -228,53 +229,84 @@ def run_strategy_logic(df_prices, df_vols, df_lows, params):
 
         capital *= (1 + daily_pnl)
         nav_record.append({'date': curr_date, 'nav': capital})
-        log_buffer_pnl.append(daily_pnl)
 
+        # 记录当日详细信息到缓冲区
+        cycle_details.append({
+            'date': curr_date,
+            'daily_ret': daily_pnl,
+            'nav': capital,
+            'holdings': curr_holdings.copy(),  # 复制当前持仓状态
+            'stopped': stopped_assets[:]  # 复制当日止损列表
+        })
+
+        # 触发止损时，额外记录一条高亮日志（可选，为了醒目）
         if stopped_assets:
             logs.append(f"⚠️ [{curr_date.strftime('%Y-%m-%d')}] 触发止损: {', '.join(stopped_assets)}")
 
-        if len(log_buffer_pnl) == 5 or i == len(full_dates) - 1 or curr_date == end_date:
-            cycle_ret = (np.prod([1 + r for r in log_buffer_pnl]) - 1)
-            hold_str = ", ".join([f"{a}({w:.1%})" for a, w in curr_holdings.items() if w > 0])
-            if not hold_str: hold_str = "空仓"
-            
-            logs.append(f"Cycle {cycle_count:02d} | 收益: {cycle_ret * 100:>+5.1f}% | 净值: {capital:.4f} | 持仓: {hold_str}")
-            logs.append("-" * 30)
-            
-            log_buffer_pnl = []
-            cycle_count += 1
-            if i < len(full_dates) - 1:
-                log_start_date = full_dates[i + 1]
+        # 3. 周期日志输出 (每5天 或 结束时)
+        if len(cycle_details) == 5 or i == len(full_dates) - 1 or curr_date == end_date:
+            # 计算本周期的累计收益
+            cycle_ret = (np.prod([1 + d['daily_ret'] for d in cycle_details]) - 1)
 
-    return pd.DataFrame(nav_record), pd.DataFrame(list(asset_contribution.items()), columns=['Asset', 'Contribution']), logs
+            # 获取周期起止时间
+            c_start = cycle_details[0]['date'].strftime('%Y-%m-%d')
+            c_end = cycle_details[-1]['date'].strftime('%Y-%m-%d')
+
+            # 生成周期标题
+            header = f"=== Cycle {cycle_count:02d} [{c_start} ~ {c_end}] 周期收益: {cycle_ret * 100:>+5.2f}% | 期末净值: {capital:.4f} ==="
+            logs.append(header)
+
+            # 生成每日明细
+            for d in cycle_details:
+                d_str = d['date'].strftime('%Y-%m-%d')
+
+                # 格式化持仓字符串
+                hold_str = ", ".join([f"{a}({w:.1%})" for a, w in d['holdings'].items() if w > 0])
+                if not hold_str: hold_str = "空仓"
+
+                # 如果当天有止损，在每日明细里也标记一下
+                sl_info = f" [止损: {','.join(d['stopped'])}]" if d['stopped'] else ""
+
+                # 每日日志行
+                row = (f"  [{d_str}] "
+                       f"日: {d['daily_ret'] * 100:>+5.2f}% | "
+                       f"净值: {d['nav']:.4f} | "
+                       f"持仓: {hold_str}{sl_info}")
+                logs.append(row)
+
+            logs.append("-" * 50)  # 分隔线
+
+            cycle_details = []  # 清空缓冲区
+            cycle_count += 1
+
+    return pd.DataFrame(nav_record), pd.DataFrame(list(asset_contribution.items()),
+                                                  columns=['Asset', 'Contribution']), logs
 
 
 # ================= 4. UI 页面 =================
 
 with st.sidebar:
     st.header("Dual Momentum")
-    
+
     st.caption(f"当前数据源: `{DEFAULT_DATA_FOLDER}`")
     data_folder = st.text_input("数据路径", value=DEFAULT_DATA_FOLDER)
     st.divider()
 
     st.subheader("🗓️ 核心参数")
     col_d1, col_d2 = st.columns(2)
-    
-    # === 关键修改：显式指定 min_value 和 max_value，解除10年限制 ===
+
     start_d_input = col_d1.date_input(
-        "开始日期", 
+        "开始日期",
         value=pd.to_datetime("2025-01-01"),
-        min_value=pd.to_datetime("1990-01-01"),  # 允许最早选到2000年
+        min_value=pd.to_datetime("1990-01-01"),
         max_value=pd.to_datetime("2026-12-31")
     )
     end_d_input = col_d2.date_input(
-        "结束日期", 
+        "结束日期",
         value=pd.to_datetime("2025-12-31"),
         min_value=pd.to_datetime("2000-01-01"),
         max_value=pd.to_datetime("2030-12-31")
     )
-    # =========================================================
 
     hold_num_input = st.number_input("持仓数量", 1, 20, 5)
     stop_loss_pct = st.number_input("止损 (%)", 0.0, 20.0, 4.0, step=0.5) / 100.0
@@ -293,7 +325,7 @@ st.title("Dual Momentum 策略回测")
 if run_btn:
     with st.spinner('正在加载数据...'):
         df_prices, df_vols, df_lows, err = load_data_and_calc_atr(data_folder, atr_window)
-    
+
     if err:
         st.error(err)
     else:
@@ -316,12 +348,12 @@ if run_btn:
             days = (res_nav.index[-1] - res_nav.index[0]).days
             annual_ret = (1 + total_ret) ** (365 / days) - 1 if days > 0 else 0
             max_dd = (res_nav['nav'] / res_nav['nav'].cummax() - 1).min()
-            
+
             daily_rets = res_nav['nav'].pct_change().fillna(0)
             sharpe = (daily_rets.mean() * 252) / (daily_rets.std() * np.sqrt(252)) if daily_rets.std() > 0 else 0
 
             st.success("回测完成！")
-            
+
             k1, k2, k3, k4 = st.columns(4)
             k1.metric("总收益率", f"{total_ret * 100:.2f}%", delta_color="normal")
             k2.metric("年化收益", f"{annual_ret * 100:.2f}%")
@@ -333,7 +365,7 @@ if run_btn:
             with tab_chart:
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(
-                    x=res_nav.index, y=(res_nav['nav'] - 1)*100,
+                    x=res_nav.index, y=(res_nav['nav'] - 1) * 100,
                     mode='lines', name='收益率', line=dict(color='#ff7f0e', width=2),
                     fill='tozeroy', fillcolor='rgba(255, 127, 14, 0.1)'
                 ))
@@ -363,17 +395,20 @@ if run_btn:
                     with c_win:
                         st.caption("🏆 盈利贡献 Top 5")
                         top_wins = res_contrib[res_contrib['Contribution'] > 0].head(5)
-                        st.dataframe(top_wins.style.format({"Contribution": "{:.2%}"}).background_gradient(cmap='Reds'), use_container_width=True)
-                    
+                        st.dataframe(top_wins.style.format({"Contribution": "{:.2%}"}).background_gradient(cmap='Reds'),
+                                     use_container_width=True)
+
                     with c_lose:
                         st.caption("☠️ 亏损拖累 Top 5")
                         top_loss = res_contrib[res_contrib['Contribution'] < 0].sort_values('Contribution').head(5)
-                        st.dataframe(top_loss.style.format({"Contribution": "{:.2%}"}).background_gradient(cmap='Greens_r'), use_container_width=True)
+                        st.dataframe(
+                            top_loss.style.format({"Contribution": "{:.2%}"}).background_gradient(cmap='Greens_r'),
+                            use_container_width=True)
                 else:
                     st.info("暂无交易数据")
 
             with tab_log:
-                st.text_area("交易明细", "\n".join(res_logs), height=500)
+                # 增加字体样式，使其更像代码日志
+                st.text_area("交易明细", "\n".join(res_logs), height=600, help="显示每个周期的详细交易记录")
 else:
     st.info(f"👈 请点击【运行策略】")
-
