@@ -56,7 +56,7 @@ def load_data_and_calc_atr(folder, atr_window=20):
     if not os.path.exists(folder):
         return None, None, None, f"路径不存在: {folder}"
 
-    # 【核心保留】必须排序，保证 Linux/Windows 读取顺序一致
+    # 【核心保留】必须排序
     files = sorted([f for f in os.listdir(folder) if f.endswith('.csv')])
     
     if not files:
@@ -69,7 +69,7 @@ def load_data_and_calc_atr(folder, atr_window=20):
     progress_bar = st.progress(0, text="正在加载数据...")
 
     for i, file in enumerate(files):
-        # 【核心保留】文件名标准化，防止跨平台编码问题
+        # 【核心保留】文件名标准化
         file_norm = unicodedata.normalize('NFC', file)
         
         # 剔除逻辑
@@ -87,7 +87,7 @@ def load_data_and_calc_atr(folder, atr_window=20):
             df.dropna(subset=['date', 'close', 'high', 'low'], inplace=True)
             df['date'] = df['date'].dt.normalize()
             
-            # 【核心保留】再次排序确保时间序列正确
+            # 【核心保留】再次排序
             df.sort_values('date', inplace=True)
             
             # 去重
@@ -254,7 +254,6 @@ def run_strategy_logic(df_prices, df_vols, df_lows, params):
 with st.sidebar:
     st.header("Dual Momentum")
     
-    # 简单的路径显示，不再显示复杂的环境诊断
     st.caption(f"当前数据源: `{DEFAULT_DATA_FOLDER}`")
     data_folder = st.text_input("数据路径", value=DEFAULT_DATA_FOLDER)
     st.divider()
@@ -280,7 +279,6 @@ st.title("Dual Momentum 策略回测")
 
 if run_btn:
     with st.spinner('正在加载数据...'):
-        # 调用时不再接收 debug_info
         df_prices, df_vols, df_lows, err = load_data_and_calc_atr(data_folder, atr_window)
     
     if err:
@@ -317,27 +315,61 @@ if run_btn:
             k3.metric("最大回撤", f"{max_dd * 100:.2f}%", delta_color="inverse")
             k4.metric("夏普比率", f"{sharpe:.2f}")
 
-            tab_chart, tab_attr, tab_log = st.tabs(["📈 曲线", "🏆 归因", "📝 日志"])
+            tab_chart, tab_attr, tab_log = st.tabs(["📈 曲线", "📊 盈亏", "📝 日志"])
 
             with tab_chart:
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(
                     x=res_nav.index, y=(res_nav['nav'] - 1)*100,
-                    mode='lines', name='收益率', line=dict(color='#ff7f0e', width=2)
+                    mode='lines', name='收益率', line=dict(color='#ff7f0e', width=2),
+                    fill='tozeroy', fillcolor='rgba(255, 127, 14, 0.1)'
                 ))
-                fig.update_layout(title='累计收益率 (%)', margin=dict(l=10, r=10, t=40, b=10))
+                fig.update_layout(title='累计收益率 (%)', margin=dict(l=10, r=10, t=40, b=10), hovermode="x unified")
                 st.plotly_chart(fig, use_container_width=True)
 
             with tab_attr:
-                res_contrib['Color'] = res_contrib['Contribution'].apply(lambda x: 'red' if x >= 0 else 'green')
-                fig_bar = px.bar(res_contrib, x='Contribution', y='Asset', orientation='h',
-                                 text_auto='.2%', color='Contribution',
-                                 color_continuous_scale=['green', '#f0f2f6', 'red'])
-                fig_bar.update_layout(height=max(400, len(res_contrib) * 20), yaxis={'categoryorder': 'total ascending'})
-                st.plotly_chart(fig_bar, use_container_width=True)
+                # ----------------- 可视化改造部分 -----------------
+                # 使用 Treemap (矩形树图) 替代原来的长条图
+                # 逻辑：面积=贡献绝对值(影响力)，颜色=贡献实际值(红盈绿亏)
+                
+                if not res_contrib.empty:
+                    # 准备数据
+                    plot_df = res_contrib.copy()
+                    plot_df['AbsContribution'] = plot_df['Contribution'].abs()
+                    # 格式化标签显示：品种名 + 换行 + 百分比
+                    plot_df['Label'] = plot_df['Asset'] + "<br>" + (plot_df['Contribution']).apply(lambda x: f"{x:.2%}")
+
+                    # 创建 Treemap
+                    fig_tree = px.treemap(
+                        plot_df,
+                        path=['Label'],          # 显示标签
+                        values='AbsContribution', # 板块大小 = 盈亏的绝对值
+                        color='Contribution',     # 板块颜色 = 真实盈亏
+                        color_continuous_scale=['#22c55e', '#ffffff', '#ef4444'], # 绿-白-红
+                        color_continuous_midpoint=0,
+                        title='<b>品种盈亏贡献分布</b>'
+                    )
+                    fig_tree.update_traces(textinfo="label+text")
+                    fig_tree.update_layout(margin=dict(t=50, l=10, r=10, b=10))
+                    
+                    st.plotly_chart(fig_tree, use_container_width=True)
+
+                    # 下方补充两个简洁的 Top 5 列表
+                    c_win, c_lose = st.columns(2)
+                    with c_win:
+                        st.caption("🏆 盈利贡献 Top 5")
+                        top_wins = res_contrib[res_contrib['Contribution'] > 0].head(5)
+                        st.dataframe(top_wins.style.format({"Contribution": "{:.2%}"}).background_gradient(cmap='Reds'), use_container_width=True)
+                    
+                    with c_lose:
+                        st.caption("☠️ 亏损拖累 Top 5")
+                        # 亏损榜单按从小到大排序
+                        top_loss = res_contrib[res_contrib['Contribution'] < 0].sort_values('Contribution').head(5)
+                        st.dataframe(top_loss.style.format({"Contribution": "{:.2%}"}).background_gradient(cmap='Greens_r'), use_container_width=True)
+                else:
+                    st.info("暂无交易数据")
 
             with tab_log:
                 st.text_area("交易明细", "\n".join(res_logs), height=500)
 else:
     st.info(f"👈 请点击【运行策略】")
-
