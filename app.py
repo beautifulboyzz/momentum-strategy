@@ -5,7 +5,7 @@ import os
 import plotly.express as px
 import plotly.graph_objects as go
 import unicodedata
-from datetime import datetime, timedelta
+from datetime import datetime, date
 
 # ================= 1. 系统配置 =================
 st.set_page_config(page_title="Dual Momentum回测系统", layout="wide", page_icon="⚡")
@@ -58,20 +58,20 @@ def load_data_and_calc_atr(folder, atr_window=20):
 
     # 【核心保留】必须排序
     files = sorted([f for f in os.listdir(folder) if f.endswith('.csv')])
-
+    
     if not files:
         return None, None, None, f"在 {folder} 中未找到CSV文件"
 
     price_dict = {}
     vol_dict = {}
     low_dict = {}
-
+    
     progress_bar = st.progress(0, text="正在加载数据...")
 
     for i, file in enumerate(files):
         # 【核心保留】文件名标准化
         file_norm = unicodedata.normalize('NFC', file)
-
+        
         # 剔除逻辑
         if "纤维板" in file_norm or "胶合板" in file_norm or "线材" in file_norm:
             continue
@@ -86,10 +86,10 @@ def load_data_and_calc_atr(folder, atr_window=20):
             df['date'] = pd.to_datetime(df['date'], errors='coerce')
             df.dropna(subset=['date', 'close', 'high', 'low'], inplace=True)
             df['date'] = df['date'].dt.normalize()
-
+            
             # 【核心保留】再次排序
             df.sort_values('date', inplace=True)
-
+            
             # 去重
             df = df[~df.index.duplicated(keep='last')]
             df.set_index('date', inplace=True)
@@ -237,33 +237,44 @@ def run_strategy_logic(df_prices, df_vols, df_lows, params):
             cycle_ret = (np.prod([1 + r for r in log_buffer_pnl]) - 1)
             hold_str = ", ".join([f"{a}({w:.1%})" for a, w in curr_holdings.items() if w > 0])
             if not hold_str: hold_str = "空仓"
-
-            logs.append(
-                f"Cycle {cycle_count:02d} | 收益: {cycle_ret * 100:>+5.1f}% | 净值: {capital:.4f} | 持仓: {hold_str}")
+            
+            logs.append(f"Cycle {cycle_count:02d} | 收益: {cycle_ret * 100:>+5.1f}% | 净值: {capital:.4f} | 持仓: {hold_str}")
             logs.append("-" * 30)
-
+            
             log_buffer_pnl = []
             cycle_count += 1
             if i < len(full_dates) - 1:
                 log_start_date = full_dates[i + 1]
 
-    return pd.DataFrame(nav_record), pd.DataFrame(list(asset_contribution.items()),
-                                                  columns=['Asset', 'Contribution']), logs
+    return pd.DataFrame(nav_record), pd.DataFrame(list(asset_contribution.items()), columns=['Asset', 'Contribution']), logs
 
 
 # ================= 4. UI 页面 =================
 
 with st.sidebar:
-    st.header("Dual Momentum")
-
+    st.header("⚡ Dual Momentum")
+    
     st.caption(f"当前数据源: `{DEFAULT_DATA_FOLDER}`")
     data_folder = st.text_input("数据路径", value=DEFAULT_DATA_FOLDER)
     st.divider()
 
     st.subheader("🗓️ 核心参数")
     col_d1, col_d2 = st.columns(2)
-    start_d_input = col_d1.date_input("开始日期", value=pd.to_datetime("2025-01-01"))
-    end_d_input = col_d2.date_input("结束日期", value=pd.to_datetime("2025-12-31"))
+    
+    # === 关键修改：显式指定 min_value 和 max_value，解除10年限制 ===
+    start_d_input = col_d1.date_input(
+        "开始日期", 
+        value=pd.to_datetime("2025-01-01"),
+        min_value=pd.to_datetime("1990-01-01"),  # 允许最早选到2000年
+        max_value=pd.to_datetime("2026-12-31")
+    )
+    end_d_input = col_d2.date_input(
+        "结束日期", 
+        value=pd.to_datetime("2025-12-31"),
+        min_value=pd.to_datetime("2000-01-01"),
+        max_value=pd.to_datetime("2030-12-31")
+    )
+    # =========================================================
 
     hold_num_input = st.number_input("持仓数量", 1, 20, 5)
     stop_loss_pct = st.number_input("止损 (%)", 0.0, 20.0, 4.0, step=0.5) / 100.0
@@ -282,7 +293,7 @@ st.title("Dual Momentum 策略回测")
 if run_btn:
     with st.spinner('正在加载数据...'):
         df_prices, df_vols, df_lows, err = load_data_and_calc_atr(data_folder, atr_window)
-
+    
     if err:
         st.error(err)
     else:
@@ -296,7 +307,7 @@ if run_btn:
             res_nav, res_contrib, res_logs = run_strategy_logic(df_prices, df_vols, df_lows, params)
 
         if res_nav.empty:
-            st.warning("无交易数据。")
+            st.warning("该时间段内无交易数据（可能是数据源里没有该年份的数据，或所有品种均未满足过滤条件）。")
         else:
             res_nav.set_index('date', inplace=True)
             res_contrib.sort_values('Contribution', ascending=False, inplace=True)
@@ -305,24 +316,24 @@ if run_btn:
             days = (res_nav.index[-1] - res_nav.index[0]).days
             annual_ret = (1 + total_ret) ** (365 / days) - 1 if days > 0 else 0
             max_dd = (res_nav['nav'] / res_nav['nav'].cummax() - 1).min()
-
+            
             daily_rets = res_nav['nav'].pct_change().fillna(0)
             sharpe = (daily_rets.mean() * 252) / (daily_rets.std() * np.sqrt(252)) if daily_rets.std() > 0 else 0
 
             st.success("回测完成！")
-
+            
             k1, k2, k3, k4 = st.columns(4)
             k1.metric("总收益率", f"{total_ret * 100:.2f}%", delta_color="normal")
             k2.metric("年化收益", f"{annual_ret * 100:.2f}%")
             k3.metric("最大回撤", f"{max_dd * 100:.2f}%", delta_color="inverse")
             k4.metric("夏普比率", f"{sharpe:.2f}")
 
-            tab_chart, tab_attr, tab_log = st.tabs(["📈 曲线", "📊 盈亏", "📝 日志"])
+            tab_chart, tab_attr, tab_log = st.tabs(["📈 曲线", "📊 归因 (Treemap)", "📝 日志"])
 
             with tab_chart:
                 fig = go.Figure()
                 fig.add_trace(go.Scatter(
-                    x=res_nav.index, y=(res_nav['nav'] - 1) * 100,
+                    x=res_nav.index, y=(res_nav['nav'] - 1)*100,
                     mode='lines', name='收益率', line=dict(color='#ff7f0e', width=2),
                     fill='tozeroy', fillcolor='rgba(255, 127, 14, 0.1)'
                 ))
@@ -330,47 +341,34 @@ if run_btn:
                 st.plotly_chart(fig, use_container_width=True)
 
             with tab_attr:
-                # ----------------- 可视化改造部分 -----------------
-                # 使用 Treemap (矩形树图) 替代原来的长条图
-                # 逻辑：面积=贡献绝对值(影响力)，颜色=贡献实际值(红盈绿亏)
-
                 if not res_contrib.empty:
-                    # 准备数据
                     plot_df = res_contrib.copy()
                     plot_df['AbsContribution'] = plot_df['Contribution'].abs()
-                    # 格式化标签显示：品种名 + 换行 + 百分比
                     plot_df['Label'] = plot_df['Asset'] + "<br>" + (plot_df['Contribution']).apply(lambda x: f"{x:.2%}")
 
-                    # 创建 Treemap
                     fig_tree = px.treemap(
                         plot_df,
-                        path=['Label'],  # 显示标签
-                        values='AbsContribution',  # 板块大小 = 盈亏的绝对值
-                        color='Contribution',  # 板块颜色 = 真实盈亏
-                        color_continuous_scale=['#22c55e', '#ffffff', '#ef4444'],  # 绿-白-红 (符合A股习惯)
+                        path=['Label'],
+                        values='AbsContribution',
+                        color='Contribution',
+                        color_continuous_scale=['#22c55e', '#ffffff', '#ef4444'],
                         color_continuous_midpoint=0,
                         title='<b>品种盈亏贡献分布</b>'
                     )
                     fig_tree.update_traces(textinfo="label+text")
                     fig_tree.update_layout(margin=dict(t=50, l=10, r=10, b=10))
-
                     st.plotly_chart(fig_tree, use_container_width=True)
 
-                    # 下方补充两个简洁的 Top 5 列表
                     c_win, c_lose = st.columns(2)
                     with c_win:
                         st.caption("🏆 盈利贡献 Top 5")
                         top_wins = res_contrib[res_contrib['Contribution'] > 0].head(5)
-                        st.dataframe(top_wins.style.format({"Contribution": "{:.2%}"}).background_gradient(cmap='Reds'),
-                                     use_container_width=True)
-
+                        st.dataframe(top_wins.style.format({"Contribution": "{:.2%}"}).background_gradient(cmap='Reds'), use_container_width=True)
+                    
                     with c_lose:
                         st.caption("☠️ 亏损拖累 Top 5")
-                        # 亏损榜单按从小到大排序
                         top_loss = res_contrib[res_contrib['Contribution'] < 0].sort_values('Contribution').head(5)
-                        st.dataframe(
-                            top_loss.style.format({"Contribution": "{:.2%}"}).background_gradient(cmap='Greens_r'),
-                            use_container_width=True)
+                        st.dataframe(top_loss.style.format({"Contribution": "{:.2%}"}).background_gradient(cmap='Greens_r'), use_container_width=True)
                 else:
                     st.info("暂无交易数据")
 
@@ -378,5 +376,3 @@ if run_btn:
                 st.text_area("交易明细", "\n".join(res_logs), height=500)
 else:
     st.info(f"👈 请点击【运行策略】")
-
-
