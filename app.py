@@ -283,7 +283,7 @@ with st.sidebar:
 
     st.subheader("🗓️ 核心参数")
     col_d1, col_d2 = st.columns(2)
-    start_d_input = col_d1.date_input("开始日期", value=pd.to_datetime("2024-01-01"))
+    start_d_input = col_d1.date_input("开始日期", value=pd.to_datetime("2025-01-01"))
     end_d_input = col_d2.date_input("结束日期", value=pd.to_datetime("2025-12-31"))
 
     hold_num_input = st.number_input("持仓数量", min_value=1, max_value=20, value=5)
