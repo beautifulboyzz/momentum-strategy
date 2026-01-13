@@ -11,16 +11,13 @@ from datetime import datetime, timedelta
 st.set_page_config(page_title="Dual Momentum回测系统", layout="wide", page_icon="⚡")
 
 # --- 路径自动适配逻辑 ---
-# 1. 定义本地绝对路径 (你的电脑调试用)
 local_absolute_path = r"D:\SAR日频\全部品种日线"
 
-# 2. 自动判断环境
 if os.path.exists(local_absolute_path):
     DEFAULT_DATA_FOLDER = local_absolute_path
-    ENV_STATUS = "Local (Windows)"
 else:
     DEFAULT_DATA_FOLDER = "data"
-    ENV_STATUS = "Cloud (Linux/Streamlit)"
+
 
 # ================= 2. 数据处理 =================
 
@@ -50,62 +47,47 @@ def read_robust_csv(f):
             continue
     return None
 
+
 @st.cache_data(ttl=3600)
 def load_data_and_calc_atr(folder, atr_window=20):
     """
     读取数据 (含 ATR 计算和 Low 价格读取)
     """
-    # 路径检查
     if not os.path.exists(folder):
-        return None, None, None, f"路径不存在: {folder}", {}
+        return None, None, None, f"路径不存在: {folder}"
 
-    # === 关键修正 1: 强制排序 ===
-    # Linux下 os.listdir 是乱序的，必须 sorted() 保证列的顺序一致，否则回测选股会产生随机差异
+    # 【核心保留】必须排序，保证 Linux/Windows 读取顺序一致
     files = sorted([f for f in os.listdir(folder) if f.endswith('.csv')])
     
     if not files:
-        return None, None, None, f"在 {folder} 中未找到CSV文件", {}
+        return None, None, None, f"在 {folder} 中未找到CSV文件"
 
     price_dict = {}
     vol_dict = {}
     low_dict = {}
     
-    # 诊断计数器
-    debug_info = {
-        "total_files": len(files),
-        "loaded_count": 0,
-        "filtered_count": 0,
-        "error_count": 0,
-        "filtered_examples": [],
-        "loaded_examples": []
-    }
-
     progress_bar = st.progress(0, text="正在加载数据...")
 
     for i, file in enumerate(files):
-        # 规范化文件名，防止不同系统编码差异
+        # 【核心保留】文件名标准化，防止跨平台编码问题
         file_norm = unicodedata.normalize('NFC', file)
         
         # 剔除逻辑
         if "纤维板" in file_norm or "胶合板" in file_norm or "线材" in file_norm:
-            debug_info["filtered_count"] += 1
-            if len(debug_info["filtered_examples"]) < 3:
-                debug_info["filtered_examples"].append(file_norm)
             continue
 
         name = file_norm.split('.')[0].replace("主连", "").replace("日线", "")
         path = os.path.join(folder, file)
 
         df = read_robust_csv(path)
-        if df is None: 
-            debug_info["error_count"] += 1
-            continue
+        if df is None: continue
 
         try:
             df['date'] = pd.to_datetime(df['date'], errors='coerce')
             df.dropna(subset=['date', 'close', 'high', 'low'], inplace=True)
             df['date'] = df['date'].dt.normalize()
-            # 再次排序确保时间序列正确
+            
+            # 【核心保留】再次排序确保时间序列正确
             df.sort_values('date', inplace=True)
             
             # 去重
@@ -125,13 +107,8 @@ def load_data_and_calc_atr(folder, atr_window=20):
             price_dict[name] = df['close']
             vol_dict[name] = natr
             low_dict[name] = df['low']
-            
-            debug_info["loaded_count"] += 1
-            if len(debug_info["loaded_examples"]) < 3:
-                debug_info["loaded_examples"].append(name)
 
         except Exception as e:
-            debug_info["error_count"] += 1
             continue
 
         if i % 10 == 0:
@@ -140,14 +117,14 @@ def load_data_and_calc_atr(folder, atr_window=20):
     progress_bar.empty()
 
     if not price_dict:
-        return None, None, None, "未读取到有效数据，请检查CSV格式", debug_info
+        return None, None, None, "未读取到有效数据，请检查CSV格式"
 
     # 合并为宽表
     df_prices = pd.DataFrame(price_dict).sort_index().ffill()
     df_vols = pd.DataFrame(vol_dict).sort_index().ffill()
     df_lows = pd.DataFrame(low_dict).sort_index().ffill()
 
-    return df_prices, df_vols, df_lows, None, debug_info
+    return df_prices, df_vols, df_lows, None
 
 
 # ================= 3. 核心策略逻辑 =================
@@ -276,8 +253,9 @@ def run_strategy_logic(df_prices, df_vols, df_lows, params):
 
 with st.sidebar:
     st.header("⚡ Dual Momentum")
-    st.info(f"环境: {ENV_STATUS}\n路径: `{DEFAULT_DATA_FOLDER}`")
     
+    # 简单的路径显示，不再显示复杂的环境诊断
+    st.caption(f"当前数据源: `{DEFAULT_DATA_FOLDER}`")
     data_folder = st.text_input("数据路径", value=DEFAULT_DATA_FOLDER)
     st.divider()
 
@@ -301,22 +279,9 @@ with st.sidebar:
 st.title("Dual Momentum 策略回测")
 
 if run_btn:
-    with st.spinner('正在加载数据并统一格式...'):
-        df_prices, df_vols, df_lows, err, debug_info = load_data_and_calc_atr(data_folder, atr_window)
-
-    # === 关键修正 2: 诊断信息显示 ===
-    with st.expander("🔍 数据诊断 (对比本地和云端是否一致)", expanded=False):
-        if debug_info:
-            c1, c2, c3 = st.columns(3)
-            c1.metric("总文件数", debug_info.get("total_files", 0))
-            c2.metric("成功加载", debug_info.get("loaded_count", 0))
-            c3.metric("剔除文件", debug_info.get("filtered_count", 0))
-            
-            st.write(f"**有效品种数量**: {len(df_prices.columns) if df_prices is not None else 0}")
-            st.write("**剔除示例**: ", debug_info.get("filtered_examples", []))
-            st.write("**加载示例**: ", debug_info.get("loaded_examples", []))
-            if df_prices is not None:
-                st.write(f"**数据起止**: {df_prices.index.min().date()} ~ {df_prices.index.max().date()}")
+    with st.spinner('正在加载数据...'):
+        # 调用时不再接收 debug_info
+        df_prices, df_vols, df_lows, err = load_data_and_calc_atr(data_folder, atr_window)
     
     if err:
         st.error(err)
