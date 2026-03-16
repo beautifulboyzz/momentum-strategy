@@ -782,7 +782,7 @@ with st.sidebar:
     col1, col2 = st.columns(2)
     min_date = datetime(2000, 1, 1)
     max_date = datetime(2050, 12, 31)
-    default_start = pd.to_datetime("2025-01-01")
+    default_start = pd.to_datetime("2026-01-01")
     default_end = pd.to_datetime("2026-12-31")
     start_d = col1.date_input("开始日期", value=default_start, min_value=min_date, max_value=max_date)
     end_d = col2.date_input("结束日期", value=default_end, min_value=min_date, max_value=max_date)
