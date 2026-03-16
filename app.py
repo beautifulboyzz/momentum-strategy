@@ -511,10 +511,6 @@ def run_enhanced_strategy_logic_fixed(df_p, df_atr_norm, df_l, df_o, df_h, df_at
             banned_assets.remove(asset)
             unbanned_log.append(asset)
 
-        # 3. 记录解禁日志（可选，建议保留以便观察）
-        if unbanned_log:
-            logs.append(f"🔓 解禁品种：{', '.join(unbanned_log)}")
-
         # 4. 进入当天交易准备
         start_of_day_holdings = current_holdings.copy()
 
@@ -632,7 +628,13 @@ def run_enhanced_strategy_logic_fixed(df_p, df_atr_norm, df_l, df_o, df_h, df_at
         for g_asset in global_crashed_assets:
             if g_asset not in banned_assets:
                 banned_assets.add(g_asset)
-                unbanned_log.append(f"🔥全局预警：{g_asset}放量暴跌，已拦截")
+                # 把全局暴跌伪装成一个止损记录，这样就会整齐地打印在 "⚠️ 当天止损" 里面
+                stopped_assets_info.append({
+                    'asset': g_asset,
+                    'ret': 0.0,
+                    'reason': "🔥全局预警(放量暴跌提前拦截)",
+                    'weight': 0.0
+                })
         # =======================================================
 
         # 选股与隔夜持仓
