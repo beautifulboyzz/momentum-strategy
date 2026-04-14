@@ -130,11 +130,10 @@ def get_multiplier(asset_name):
 
 
 def read_robust_csv(f):
-    """鲁棒的CSV读取函数"""
+    """鲁棒的CSV读取函数 (适配 TqSdk 数据)"""
     for enc in ['gbk', 'utf-8', 'gb18030', 'cp936']:
         try:
             df = pd.read_csv(f, encoding=enc, engine='python')
-            cols = [str(c).strip() for c in df.columns]
             rename_map = {}
             for c in df.columns:
                 c_str = str(c).strip()
@@ -145,6 +144,8 @@ def read_robust_csv(f):
                 if c_str in ['开盘价', '开盘', 'open', 'Open']: rename_map[c] = 'open'
                 if c_str in ['成交量', 'volume', 'Volume', 'vol']: rename_map[c] = 'volume'
                 if c_str in ['成交额', 'amount', 'Amount']: rename_map[c] = 'amount'
+                # 新增：解析天勤的持仓量字段
+                if c_str in ['持仓量', 'open_interest', 'oi']: rename_map[c] = 'open_interest'
 
             df.rename(columns=rename_map, inplace=True)
             if 'date' in df.columns and 'close' in df.columns:
@@ -665,6 +666,10 @@ def run_enhanced_strategy_logic_fixed(df_p, df_atr_norm, df_l, df_o, df_h, df_at
                 # 【极简且暴力的纯粹排名过滤】
                 # 从高到低遍历当天得分最高的品种
                 for asset in ranked_pool.index:
+                    # ---- 新增：得分必须大于0.6 ----
+                    if scores[asset] <= 0.6:
+                        continue
+                    # -------------------------------
                     sec = get_sector(asset)
                     # 只要该品种所在板块没满，直接入选！
                     if sector_counts.get(sec, 0) < max_per_sector:
