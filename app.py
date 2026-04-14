@@ -1011,8 +1011,8 @@ if run_btn:
 
                             st.dataframe(
                                 df_debug.style
-                                .applymap(highlight_status, subset=['状态'])
-                                .applymap(color_bool, subset=['MA滤网', '动量滤网'])
+                                .map(highlight_status, subset=['状态'])
+                                .map(color_bool, subset=['MA滤网', '动量滤网'])
                                 .format({
                                     '价格': '{:.2f}',
                                     '综合得分': '{:.4f}',
