@@ -250,27 +250,76 @@ def load_data_and_calc_metrics(folder, atr_window=20):
 
 class EnhancedFactors:
     @staticmethod
-    def calculate_multi_period_momentum(df_p, periods=[5, 10, 20, 60]):
-        avg_roc = pd.DataFrame(0.0, index=df_p.index, columns=df_p.columns)
+    def calculate_multi_period_momentum(df_p, periods=[5, 10, 20, 60], weights=[0.4, 0.3, 0.2, 0.1], smooth_window=3):
+        # 1. 价格平滑预处理
+        if smooth_window > 1:
+            smoothed_p = df_p.rolling(window=smooth_window, min_periods=1).mean()
+        else:
+            smoothed_p = df_p
+
+        # 2. 权重校验与归一化保护
+        if len(weights) != len(periods):
+            # 如果周期数和权重数对不上，退化为等权重
+            weights = [1.0 / len(periods)] * len(periods)
+        else:
+            total_weight = sum(weights)
+            weights = [w / total_weight for w in weights]
+
+        # 3. 初始化矩阵
+        weighted_avg_rank = pd.DataFrame(0.0, index=df_p.index, columns=df_p.columns)
         mom_sign_matrix = pd.DataFrame(0.0, index=df_p.index, columns=df_p.columns)
-        valid_count = 0
-        for p in periods:
-            roc = df_p.pct_change(p)
-            avg_roc = avg_roc.add(roc.fillna(0), fill_value=0)
+
+        # 用于 T6 面板的透视数据
+        debug_period_roc = {}
+        debug_period_rank = {}
+
+        # 4. 循环计算各个周期的动量并加权
+        for i, p in enumerate(periods):
+            # 计算平滑收益率
+            roc = smoothed_p.pct_change(p)
+
+            # 不看涨跌幅，只看全市场名次（0~1）
+            current_rank = roc.rank(axis=1, pct=True)
+
+            # 把名次乘以对应的时间衰减权重
+            w = weights[i]
+            weighted_avg_rank = weighted_avg_rank.add(current_rank * w, fill_value=0)
+
+            # 及格线：必须收红
             mom_sign = (roc > 0).astype(int)
             mom_sign_matrix = mom_sign_matrix.add(mom_sign, fill_value=0)
-            valid_count += 1
-        raw_avg_momentum = avg_roc / valid_count
-        momentum_score = raw_avg_momentum.rank(axis=1, pct=True)
-        momentum_filter = (mom_sign_matrix >= 4)
-        return momentum_score, momentum_filter
+
+            # 记录白盒数据
+            debug_period_roc[p] = roc
+            debug_period_rank[p] = current_rank
+
+        # 5. 为了保持因子标准正态化，把“加权平均名次”再做一次全场排名，作为最终得分
+        momentum_score = weighted_avg_rank.rank(axis=1, pct=True)
+
+        # 6. 动量及格滤网
+        momentum_filter = (mom_sign_matrix >= len(periods))
+
+        mom_debug_info = {
+            'roc': debug_period_roc,
+            'rank': debug_period_rank,
+            'avg_rank': weighted_avg_rank,
+            'weights': dict(zip(periods, weights))  # 把权重传给前端展示
+        }
+
+        return momentum_score, momentum_filter, mom_debug_info
 
 
     @staticmethod
     def calculate_volatility_adjustment(df_p, target_vol=0.25):
         returns = df_p.pct_change()
-        market_vol = returns.std(axis=1) * np.sqrt(252)
-        market_vol_avg = market_vol.rolling(60).mean()
+
+        # 1. 先求出每个品种各自的时间序列波动率（互不抵消）
+        all_assets_vol = returns.rolling(60, min_periods=20).std() * np.sqrt(252)
+
+        # 2. 再求所有品种在当天的“平均波动率”（这才是市场真实的活跃度）
+        market_vol_avg = all_assets_vol.mean(axis=1)
+
+        # 3. 计算仓位缩放乘数
         vol_scaler = target_vol / (market_vol_avg + 1e-8)
         return pd.Series(vol_scaler.clip(0.3, 2.0), index=df_p.index)
 
@@ -342,7 +391,7 @@ def run_enhanced_strategy_logic_fixed(df_p, df_atr_norm, df_l, df_o, df_h, df_at
 
     # (1) 动量
     if use_multi_period:
-        momentum_score, momentum_filter = factors.calculate_multi_period_momentum(df_p, lookback_periods)
+        momentum_score, momentum_filter, mom_debug_info = factors.calculate_multi_period_momentum(df_p,lookback_periods)
     else:
         mom_short = df_p.pct_change(lookback_periods[0])
         mom_long = df_p.pct_change(lookback_periods[-1])
@@ -368,7 +417,8 @@ def run_enhanced_strategy_logic_fixed(df_p, df_atr_norm, df_l, df_o, df_h, df_at
         'momentum_filter': momentum_filter,
         'liquidity_score': liquidity_score,
         'ma_filter': ma_filter,
-        'vol_scaler': vol_scaler
+        'vol_scaler': vol_scaler,
+        'mom_debug_info': mom_debug_info
     }
 
     # 3. 起点
@@ -439,18 +489,6 @@ def run_enhanced_strategy_logic_fixed(df_p, df_atr_norm, df_l, df_o, df_h, df_at
             block_logs.append("")
         block_logs.append("=" * 60)
         return block_logs
-
-    def portfolio_risk_control(nav_series, current_capital, lookback=60):
-        if len(nav_series) < lookback: return 1.0, False
-        peak = np.maximum.accumulate(nav_series)
-        current_dd = (current_capital - peak[-1]) / peak[-1] if peak[-1] > 0 else 0
-        returns = pd.Series(nav_series).pct_change().dropna()
-        if len(returns) >= 20:
-            recent_vol = returns.tail(20).std() * np.sqrt(252)
-            historical_vol = returns.std() * np.sqrt(252)
-            if historical_vol > 0 and recent_vol > historical_vol * 1.5:
-                return 0.7, False
-        return 1.0, False
 
     start_date_str = start_date.strftime('%Y-%m-%d')
     end_date_str = end_date.strftime('%Y-%m-%d')
@@ -550,8 +588,7 @@ def run_enhanced_strategy_logic_fixed(df_p, df_atr_norm, df_l, df_o, df_h, df_at
             atr_val = df_atr_abs.loc[prev_date, asset]
             atr_crash_price = prev_close - (3 * atr_val)
 
-            is_high_vol = (today_vol > 2 * avg_vol_20) if avg_vol_20 > 0 else False
-            effective_atr_stop = atr_crash_price if is_high_vol else -99999999.0
+            effective_atr_stop = atr_crash_price
 
             effective_stop_price = max(stop_price_trail, stop_price_hard, effective_atr_stop)
 
@@ -617,12 +654,11 @@ def run_enhanced_strategy_logic_fixed(df_p, df_atr_norm, df_l, df_o, df_h, df_at
         all_avg_vols_20 = df_vol_ma.loc[prev_date]
         all_atr_vals = df_atr_abs.loc[prev_date]
 
-        # 向量化计算：放量（成交量>2倍均量）且 暴跌（最低价击穿3倍ATR）
+        # 向量化计算 暴跌（最低价击穿3倍ATR）
         all_atr_crash_prices = all_prev_closes - (3 * all_atr_vals)
-        all_is_high_vols = all_today_vols > (2 * all_avg_vols_20)
 
         # 生成布尔掩码，找出今天触发熔断的所有品种
-        global_crash_mask = (all_today_lows <= all_atr_crash_prices) & all_is_high_vols
+        global_crash_mask = (all_today_lows <= all_atr_crash_prices)
         global_crashed_assets = global_crash_mask[global_crash_mask].index.tolist()
 
         # 将它们全部关进小黑屋
@@ -687,7 +723,7 @@ def run_enhanced_strategy_logic_fixed(df_p, df_atr_norm, df_l, df_o, df_h, df_at
 
                     # 1. 波动率下限与平滑处理
                     vols = vols.clip(lower=0.005)
-                    inv_vol = 1.0 / (vols ** 0.5)
+                    inv_vol = 1.0 / vols
 
 
                     raw_weights = inv_vol / inv_vol.sum()
@@ -793,9 +829,9 @@ with st.sidebar:
     end_d = col2.date_input("结束日期", value=default_end, min_value=min_date, max_value=max_date)
 
     st.subheader("🎯 核心仓位参数")
-    c1, c2 = st.columns(2)  # 把原来的两列改成三列
+    c1, c2 = st.columns(2)
     hold_num = c1.number_input("目标持仓", 1, 20, 5)
-    max_sector = c2.number_input("板块上限", 1, 10, 2)  # 新增参数
+    max_sector = c2.number_input("板块上限", 1, 10, 2)
 
     st.write("🛑 **止损参数**")
     s1, s2 = st.columns(2)
@@ -804,9 +840,8 @@ with st.sidebar:
 
     st.subheader("💸 成本设置")
     cc1, cc2 = st.columns(2)
-    comm_bp = cc1.number_input("手续费(bp)", 0.0, 50.0, 0.0)  # 默认万3
+    comm_bp = cc1.number_input("手续费(bp)", 0.0, 50.0, 0.0)
     slip_bp = cc2.number_input("滑点(bp)", 0.0, 50.0, 0.0)
-
 
     with st.expander("🛠️ 因子与熔断配置"):
         periods_input = st.text_input("动量周期列表", value="5,10,20,60")
@@ -820,9 +855,13 @@ with st.sidebar:
 
 st.title("Trend-Momentum")
 
+# 👇 核心修复：用 session_state 记住按钮点击状态，防止交互时白屏
 if run_btn:
+    st.session_state['has_run'] = True
+
+if st.session_state.get('has_run', False):
     with st.spinner("数据加载中..."):
-        # 使用代码1的数据加载函数（包含乘数修正逻辑）
+        # 加载数据
         (df_p, df_atr_norm, df_l, df_o, df_h, df_atr_abs,
          df_vol, df_vol_ma, df_amount, df_liquidity, err) = load_data_and_calc_metrics(data_folder, atr_win)
 
@@ -838,8 +877,8 @@ if run_btn:
                 'hold_num': hold_num,
                 'max_per_sector': max_sector,
                 'ma': ma_win,
-                'stop_loss_trail': stop_trail / 100.0,  # 转换百分比
-                'stop_loss_hard': stop_hard / 100.0,  # 转换百分比
+                'stop_loss_trail': stop_trail / 100.0,
+                'stop_loss_hard': stop_hard / 100.0,
                 'start_date': start_d,
                 'end_date': end_d,
                 'commission': comm_bp / 10000,
@@ -850,13 +889,10 @@ if run_btn:
             }
 
             with st.spinner("策略回测中..."):
-                # 解包返回值 (包含了新增加的 all_daily_details)
                 res_nav, res_logs, debug_data, res_contrib, res_cycle_details = run_enhanced_strategy_logic_fixed(
                     df_p, df_atr_norm, df_l, df_o, df_h, df_atr_abs,
                     df_vol, df_vol_ma, df_amount, df_liquidity, params
                 )
-
-                # 转换贡献度格式以适配UI
                 res_contrib_df = pd.DataFrame(list(res_contrib.items()), columns=['Asset', 'Contribution'])
 
             if res_nav.empty:
@@ -888,10 +924,11 @@ if run_btn:
                 col7.metric("胜率", f"{win_rate:.1f}%")
                 col8.metric("交易天数", f"{len(res_nav)}")
 
-                t1, t2, t3, t4 = st.tabs(["📈 净值曲线", "📊 盈亏分布", "📝 交易日志", "🔬 详细分析"])
+                # 👇 加入了 t5 标签页
+                t1, t2, t3, t4, t5, t6 = st.tabs(
+                    ["📈 净值曲线", "📊 盈亏分布", "📝 交易日志", "🔬 详细分析", "🧮 公式拆解", "🏅 动量排行透视"])
 
                 with t1:
-                    # 1. 核心修改：把原来的 figsize=(12, 6) 改为 (12, 3.5) 或者更小的高度
                     fig, ax1 = plt.subplots(figsize=(12, 4.5))
                     x = res_nav.index
                     y = res_nav['nav']
@@ -901,16 +938,12 @@ if run_btn:
                     ax1.set_title(f"趋势动量策略", fontproperties=my_font, fontsize=14)
                     ax1.legend(prop=my_font)
                     ax1.grid(True, alpha=0.3)
-
-                    # 2. 核心修改：增加紧凑布局，消除图片上下左右多余的白色留白
                     fig.tight_layout()
-
                     st.pyplot(fig)
 
                 with t2:
                     if not res_contrib_df.empty:
-                        res_contrib_df['Contribution_pct'] = res_contrib_df[
-                                                                 'Contribution'] / tot_ret if tot_ret != 0 else 0
+                        res_contrib_df['Contribution_pct'] = res_contrib_df['Contribution'] / tot_ret if tot_ret != 0 else 0
                         st.dataframe(
                             res_contrib_df.style.format({'Contribution': '{:.2%}', 'Contribution_pct': '{:.1%}'})
                             .background_gradient(cmap='RdYlGn', subset=['Contribution']),
@@ -925,7 +958,6 @@ if run_btn:
                     st.markdown("### 🔬 每日全品种得分透视")
                     st.caption("选择一个日期，查看当天所有品种的因子得分、排名以及过滤状态。这是排查'为什么没买它'的神器。")
 
-                    # 1. 日期选择器
                     valid_dates = res_nav.index
                     default_date = valid_dates[-1] if len(valid_dates) > 0 else date.today()
 
@@ -939,24 +971,18 @@ if run_btn:
                     if target_date not in valid_dates:
                         st.warning("该日期无交易数据（可能是周末或节假日），请选择临近日期。")
                     else:
-                        # 2. 构建当日因子表
                         try:
-                            # 寻找当日的 detail 记录
                             day_detail = next((d for d in res_cycle_details if d['date'] == target_date), None)
-                            # 从 detail 中获取持仓、黑名单和入场价
                             held_assets = list(day_detail['next_day_hold'].keys()) if day_detail else []
                             banned_now = day_detail['banned_list'] if day_detail and 'banned_list' in day_detail else []
-                            entry_prices_now = day_detail[
-                                'entry_prices'] if day_detail and 'entry_prices' in day_detail else {}
+                            entry_prices_now = day_detail['entry_prices'] if day_detail and 'entry_prices' in day_detail else {}
 
-                            # 提取因子
                             mom_s = debug_data['momentum_score'].loc[target_date]
                             liq_s = debug_data['liquidity_score'].loc[target_date]
                             ma_pass = debug_data['ma_filter'].loc[target_date]
                             mom_pass = debug_data['momentum_filter'].loc[target_date]
                             closes = df_p.loc[target_date]
 
-                            # 👈 新增：计算次日止损价 (综合硬止损、移动止损、ATR熔断，取最高值)
                             stop_prices = pd.Series(np.nan, index=closes.index)
                             stop_trail_pct = stop_trail / 100.0
                             stop_hard_pct = stop_hard / 100.0
@@ -966,17 +992,14 @@ if run_btn:
                                     prev_c = closes[asset]
                                     s_trail = prev_c * (1 - stop_trail_pct)
                                     s_hard = entry_prices_now.get(asset, prev_c) * (1 - stop_hard_pct)
-                                    s_atr = prev_c - 3 * df_atr_abs.loc[
-                                        target_date, asset] if asset in df_atr_abs.columns else 0
+                                    s_atr = prev_c - 3 * df_atr_abs.loc[target_date, asset] if asset in df_atr_abs.columns else 0
                                     stop_prices[asset] = max(s_trail, s_hard, s_atr)
 
-                            # 合成总分 (0.7 * Mom + 0.3 * Liq)
                             final_score = (mom_s * 0.7 + liq_s * 0.3).fillna(-1)
 
-                            # 构建 DataFrame
                             df_debug = pd.DataFrame({
                                 '价格': closes,
-                                '次日止损': stop_prices,  # 👈 新增列
+                                '次日止损': stop_prices,
                                 '综合得分': final_score,
                                 '动量分': mom_s,
                                 '流动性分': liq_s,
@@ -984,35 +1007,26 @@ if run_btn:
                                 '动量滤网': mom_pass,
                             })
 
-                            # 标记状态
                             df_debug['状态'] = '观察'
                             df_debug.loc[df_debug.index.isin(banned_now), '状态'] = '🚫熔断黑名单'
                             df_debug.loc[df_debug.index.isin(held_assets), '状态'] = '✅ 持仓中'
 
-                            # 过滤掉退市或无数据的品种
                             df_debug.dropna(subset=['价格'], inplace=True)
-
-                            # 排序：持仓优先，然后按分数降序
                             df_debug.sort_values(by=['综合得分'], ascending=False, inplace=True)
 
-
-                            # 3. 样式美化
                             def highlight_status(val):
-                                if '持仓' in str(
-                                    val): return 'background-color: #90ee90; color: black; font-weight: bold'
+                                if '持仓' in str(val): return 'background-color: #90ee90; color: black; font-weight: bold'
                                 if '黑名单' in str(val): return 'background-color: #ffcccb; color: black'
                                 return ''
 
-
                             def color_bool(val):
-                                color = '#90ee90' if val else '#ffcccb'  # 绿/红
+                                color = '#90ee90' if val else '#ffcccb'
                                 return f'background-color: {color}; color: black'
-
 
                             st.dataframe(
                                 df_debug.style
-                                .map(highlight_status, subset=['状态'])
-                                .map(color_bool, subset=['MA滤网', '动量滤网'])
+                                .applymap(highlight_status, subset=['状态'])
+                                .applymap(color_bool, subset=['MA滤网', '动量滤网'])
                                 .format({
                                     '价格': '{:.2f}',
                                     '综合得分': '{:.4f}',
@@ -1024,7 +1038,6 @@ if run_btn:
                                 height=800
                             )
 
-                            # 4. 显示当天的统计摘要
                             st.info(f"📅 **{target_date.date()} 统计**：共有 {len(df_debug)} 个有效品种，"
                                     f"其中 {df_debug['MA滤网'].sum()} 个站上均线，"
                                     f"最终选出 {len(held_assets)} 个持仓品种。")
@@ -1032,3 +1045,243 @@ if run_btn:
                         except Exception as e:
                             st.error(f"无法生成当日透视表 (可能数据缺失): {str(e)}")
 
+                with t5:
+                    st.markdown("### 🧮 每日单品种公式与因子底层拆解")
+                    st.caption("选择日期和特定品种，如同用显微镜查看系统底层是如何用数学公式一步步算出最终信号和权重的。")
+
+                    c_t5_1, c_t5_2 = st.columns(2)
+                    with c_t5_1:
+                        target_t5_date_input = st.date_input("选择回测日期", value=default_date,
+                                                             min_value=valid_dates[0], max_value=valid_dates[-1],
+                                                             key="t5_date")
+                    target_t5_date = pd.to_datetime(target_t5_date_input)
+
+                    if target_t5_date in valid_dates:
+                        available_assets = df_p.loc[target_t5_date].dropna().index.tolist()
+                        with c_t5_2:
+                            target_asset = st.selectbox("选择要拆解的品种", options=available_assets, key="t5_asset")
+
+                        if target_asset:
+                            st.markdown(f"#### 🔎 【{target_asset}】 @ {target_t5_date.date()} 因子链路白盒拆解")
+                            st.divider()
+
+                            try:
+                                p_today = df_p.loc[target_t5_date, target_asset]
+
+                                # ====== 模块 1 ======
+                                st.markdown("##### 1. 均线与绝对趋势 (MA Filter)")
+                                st.markdown("**逻辑**：要求当日收盘价必须严格站上过去 N 日的平均线，剔除左侧接飞刀。")
+
+                                ma_win_val = int(ma_win)
+                                past_prices = df_p[target_asset].loc[:target_t5_date].tail(ma_win_val)
+                                ma_val = past_prices.mean()
+                                is_ma_pass = p_today > ma_val
+
+                                st.latex(r"MA_{" + str(ma_win_val) + r"} = \frac{1}{" + str(ma_win_val) + r"}\sum_{i=0}^{" + str(ma_win_val - 1) + r"} P_{t-i}")
+                                st.write(f"- **代入数据**：当前价格 $P = {p_today:.2f}$，计算出的均线 $MA = {ma_val:.2f}$")
+                                st.write(f"- **滤网判定**：`{p_today:.2f} > {ma_val:.2f}` 结果为 **{'✅ 达标' if is_ma_pass else '❌ 破位 (禁止买入)'}**")
+
+                                st.markdown("---")
+
+                                # ====== 模块 2 ======
+                                st.markdown("##### 2. 多周期动量测算 (Smoothed Momentum)")
+                                st.markdown("**逻辑**：对价格进行3日平滑后，计算各周期收益率。要求所有周期收益率必须为正。")
+
+                                p_smooth_series = df_p[target_asset].loc[:target_t5_date].tail(100).rolling(3, min_periods=1).mean()
+                                p_smooth_today = p_smooth_series.iloc[-1]
+
+                                st.latex(r"ROC_n = \frac{P_{smooth\_today}}{P_{smooth\_t-n}} - 1")
+                                st.write(f"*(当前 3日平滑基准价 $P_{{smooth}} = {p_smooth_today:.2f}$)*")
+
+                                pass_count = 0
+                                for p in periods:
+                                    if len(p_smooth_series) > p:
+                                        p_past = p_smooth_series.iloc[-(p + 1)]
+                                        roc = (p_smooth_today / p_past) - 1
+                                        is_pos = roc > 0
+                                        if is_pos: pass_count += 1
+                                        st.write(f"- **{p}日动量**：过去基准价 `{p_past:.2f}` ➔ 涨幅: `{roc * 100:+.2f}%` 状态: {'✅' if is_pos else '❌'}")
+
+                                st.write(f"- **滤网判定**：当前共计 `{pass_count}` 个周期收红。要求必须满贯 ({len(periods)}/{len(periods)}) ➔ **{'✅ 动量极强' if pass_count >= len(periods) else '❌ 动量不足'}**")
+
+                                st.markdown("---")
+
+                                # ====== 模块 3 ======
+                                st.markdown("##### 3. 截面排名得分合成 (Cross-Sectional Scoring)")
+                                st.markdown("**逻辑**：将该品种的动量强度和流动性强度放入全市场进行百分位排名（Percentile Rank），并加权。")
+
+                                mom_s = debug_data['momentum_score'].loc[target_t5_date, target_asset]
+                                liq_s = debug_data['liquidity_score'].loc[target_t5_date, target_asset]
+                                final_score = (mom_s * 0.7) + (liq_s * 0.3) if not pd.isna(mom_s) else 0.0
+
+                                st.latex(r"Score_{final} = (Mom_{rank} \times 0.7) + (Liq_{rank} \times 0.3)")
+                                st.write(f"- **代入数据**：动量全市场击败了 `{mom_s * 100:.1f}%` 的品种；流动性击败了 `{liq_s * 100:.1f}%` 的品种。")
+                                st.write(f"- **得分计算**：`({mom_s:.4f} * 0.7) + ({liq_s:.4f} * 0.3) = {final_score:.4f}`")
+                                st.write(f"- **排名淘汰**：如果该得分 `<= 0.6`，即使指标全绿也会被强制丢弃！")
+
+                                st.markdown("---")
+
+                                # ====== 模块 4 ======
+                                st.markdown("##### 4. 波动率平价与仓位分配 (Risk Parity Weighting)")
+                                st.markdown("**逻辑**：如果该品种入选，其分配到的基础仓位与其自身的波动率成反比。波动越大，买得越少。")
+
+                                atr_norm_val = df_atr_norm.loc[target_t5_date, target_asset]
+                                clipped_vol = max(atr_norm_val, 0.005)
+                                inv_vol = 1.0 / clipped_vol
+
+                                st.latex(r"Weight_{raw} = \frac{1}{\max(\sigma_{asset}, 0.005)}")
+                                st.write(f"- **代入数据**：该品种当日 NATR(波动率) 为 `{atr_norm_val * 100:.2f}%`。")
+                                st.write(f"- **计算权重**：倒数权重得分为 `{inv_vol:.2f}`。")
+                                # =========================================
+                                # 模块 5：实盘仓位演变 (Portfolio Allocation)
+                                # =========================================
+                                st.markdown("##### 5. 组合分配与最终仓位 (Portfolio Allocation)")
+
+                                # 尝试获取当天的持仓记录
+                                day_detail_t5 = next((d for d in res_cycle_details if d['date'] == target_t5_date),
+                                                     None)
+                                held_assets_t5 = list(day_detail_t5['next_day_hold'].keys()) if day_detail_t5 else []
+
+                                if target_asset in held_assets_t5:
+                                    st.success(f"🎉 **{target_asset}** 成功闯过所有滤网，入选当日持仓名单！")
+
+                                    with st.expander("💡 点击查看：它是怎么算出这个精确仓位的？(全量数学推导)",
+                                                     expanded=True):
+                                        # 重新提取同侪数据以展示中间变量
+                                        vols_t5 = df_atr_norm.loc[target_t5_date, held_assets_t5].clip(lower=0.005)
+                                        inv_vols_t5 = 1.0 / vols_t5
+                                        sum_inv_vols = inv_vols_t5.sum()
+                                        norm_w = inv_vols_t5[target_asset] / sum_inv_vols
+
+                                        # 提取大盘杠杆调节系数
+                                        pos_mult = debug_data['vol_scaler'].loc[target_t5_date]
+                                        target_vol_pct = target_volatility * 100
+                                        # 逆推当天的全市场实际波动率
+                                        market_vol_pct = (target_volatility / pos_mult) * 100 if pos_mult > 0 else 0
+
+                                        scaled_w = norm_w * pos_mult
+                                        final_w = day_detail_t5['next_day_hold'][target_asset]
+
+                                        st.markdown("**第一步：测量个体波动率 (Inverse Volatility)**")
+                                        st.write(
+                                            f"- `{target_asset}` 的当日波动率 (NATR) 为 **`{vols_t5[target_asset] * 100:.2f}%`**。")
+                                        st.write(
+                                            f"- 波动越小买越多，取其倒数得到【原始风险权重】：`1 / {vols_t5[target_asset]:.4f}` = **`{inv_vols_t5[target_asset]:.2f}`**。")
+
+                                        st.markdown("**第二步：团队归一化 (切分 100% 基础蛋糕)**")
+                                        st.write(
+                                            f"- 当日共同入选的 **{len(held_assets_t5)}** 个队友的【原始风险权重】分别是：")
+                                        peer_details = " | ".join(
+                                            [f"{a}: {inv_vols_t5[a]:.2f}" for a in held_assets_t5])
+                                        st.caption(f"  *(队友分值：{peer_details})*")
+                                        st.write(f"- 所有人权重总和 (分母) = **`{sum_inv_vols:.2f}`**")
+                                        st.write(
+                                            f"- `{target_asset}` 的基础占比 = 自身 `{inv_vols_t5[target_asset]:.2f}` / 分母 `{sum_inv_vols:.2f}` = **`{norm_w * 100:.2f}%`**")
+
+                                        st.markdown("**第三步：大盘杠杆调节 (Target Volatility Scaling)**")
+                                        st.write(
+                                            f"- 系统侦测到当日大宗商品市场平均波动率约为 **`{market_vol_pct:.2f}%`**。")
+                                        st.write(f"- 设定的总目标波动率为 **`{target_vol_pct:.2f}%`**。")
+                                        if pos_mult >= 1.0:
+                                            st.write(
+                                                f"- 市场相对平静，计算总杠杆乘数 = `{target_vol_pct:.2f}` / `{market_vol_pct:.2f}` = **`{pos_mult:.2f}`** 倍 (加仓)。")
+                                        else:
+                                            st.write(
+                                                f"⚠️ **市场风险较高**，计算总杠杆乘数 = `{target_vol_pct:.2f}` / `{market_vol_pct:.2f}` = **`{pos_mult:.2f}`** 倍 (主动降仓避险！)。")
+
+                                        st.write(
+                                            f"- 乘以杠杆后的【初定目标仓位】 = `{norm_w * 100:.2f}%` × `{pos_mult:.4f}` = **`{scaled_w * 100:.2f}%`**。")
+
+                                        st.markdown("**第四步：30% 天花板与溢出微调 (Spillover Check)**")
+                                        # 检查有没有超标的队友
+                                        scaled_all = inv_vols_t5 / sum_inv_vols * pos_mult
+                                        overflow_peers = scaled_all[scaled_all > 0.30]
+
+                                        if overflow_peers.empty:
+                                            st.write(
+                                                "➔ ✅ **全员安全**：今天所有队友的初定仓位均未超过 30%。**没有发生资金溢出和强行截断。**")
+                                            st.write(
+                                                f"➔ 🎯 **最终核定实盘仓位** = 初定仓位 = **`{final_w * 100:.2f}%`**")
+                                        else:
+                                            overflow_str = ", ".join(
+                                                [f"{a}({scaled_all[a] * 100:.1f}%)" for a in overflow_peers.index])
+                                            st.write(f"- 侦测到有队友初定仓位超标：{overflow_str}")
+                                            if abs(final_w - scaled_w) < 0.001:
+                                                st.write(
+                                                    f"➔ ⚖️ **结果**：虽然有队友超标，但 `{target_asset}` 自身未受影响，最终保持为：**`{final_w * 100:.2f}%`**")
+                                            elif final_w < scaled_w:
+                                                st.write(
+                                                    f"➔ ⚠️ **触发截断**：`{target_asset}` 初定仓位 (`{scaled_w * 100:.2f}%`) 超过上限！被强制削减至：**`{final_w * 100:.2f}%`**")
+                                            else:
+                                                st.write(
+                                                    f"➔ 🎁 **获得补贴**：超标的队友被砍掉多余资金，`{target_asset}` 按比例吸纳了溢出资金，膨胀至：**`{final_w * 100:.2f}%`**")
+                                else:
+                                    st.warning(
+                                        f"🚫 **{target_asset}** 未能入选当日最终的持仓组合。可能由于：1. 截面得分排名不足 2. 触发板块数量上限 3. MA/动量滤网未达标。当前仓位为 **0%**。")
+
+                            except Exception as e:
+                                st.error(f"提取底层数据时发生错误 (可能该品种在当前日期停牌或无数据)：{str(e)}")
+                with t6:
+                    st.markdown("### 🏅 终极动量透视 (Rank + Time-Decay)")
+                    st.caption("展示【先排名，再时间加权】的计算链路。既破除了长线‘幅度霸权’，又赋予了近期爆发力更高的权重。")
+
+                    c_t6_1, c_t6_2 = st.columns(2)
+                    with c_t6_1:
+                        target_t6_date_input = st.date_input("📅 选择回测日期", value=default_date,
+                                                             min_value=valid_dates[0], max_value=valid_dates[-1],
+                                                             key="t6_date")
+                    target_t6_date = pd.to_datetime(target_t6_date_input)
+
+                    if target_t6_date in valid_dates:
+                        available_assets_t6 = df_p.loc[target_t6_date].dropna().index.tolist()
+                        with c_t6_2:
+                            target_asset_t6 = st.selectbox("📦 选择要拆解的品种", options=available_assets_t6,
+                                                           key="t6_asset")
+
+                        if target_asset_t6:
+                            st.markdown(f"#### 🔎 【{target_asset_t6}】 @ {target_t6_date.date()} 因子加权链路")
+                            mom_info = debug_data.get('mom_debug_info')
+
+                            if mom_info and 'roc' in mom_info:
+                                st.markdown("##### 1. 周期名次与时间衰减权重")
+                                st.markdown(
+                                    "逻辑：越近期的表现，占最终得分的比重越大。将每个周期的 `截面名次` × `设定权重`。")
+
+                                records = []
+                                w_dict = mom_info['weights']
+                                for p in periods:
+                                    r_val = mom_info['roc'][p].loc[target_t6_date, target_asset_t6]
+                                    rank_val = mom_info['rank'][p].loc[target_t6_date, target_asset_t6]
+                                    weight_val = w_dict.get(p, 0)
+                                    records.append({
+                                        "观察周期": f"{p} 日",
+                                        "平滑绝对涨幅": f"{r_val * 100:.2f}%" if not pd.isna(r_val) else "N/A",
+                                        "截面名次(0~1)": rank_val if not pd.isna(rank_val) else 0.0,
+                                        "时间权重分配": f"{weight_val * 100:.0f}%",
+                                        "折算后贡献分": (rank_val * weight_val) if not pd.isna(rank_val) else 0.0
+                                    })
+
+                                df_t6 = pd.DataFrame(records)
+                                st.dataframe(
+                                    df_t6.style.format({
+                                        "截面名次(0~1)": "{:.4f}",
+                                        "折算后贡献分": "{:.4f}"
+                                    }).bar(subset=['折算后贡献分'], vmin=0, vmax=0.4, color='#5fba7d'),
+                                    use_container_width=True
+                                )
+
+                                avg_rank_val = mom_info['avg_rank'].loc[target_t6_date, target_asset_t6]
+                                final_score_val = debug_data['momentum_score'].loc[target_t6_date, target_asset_t6]
+
+                                st.markdown("##### 2. 终极合成与筛选")
+                                st.write(f"- **加权总得分**：将上述折算分加总 = **`{avg_rank_val:.4f}`**")
+                                st.write(
+                                    f"- **二次名次正态化(综合动量分)**：将该得分与全市场PK，锁定最终排位 = **`{final_score_val:.4f}`**")
+
+                                if final_score_val <= 0.6:
+                                    st.error(
+                                        f"❌ 最终动量排位 `{final_score_val:.4f}` <= 0.6 (要求击败全市场 60% 的品种)。被残酷淘汰，禁止建仓！")
+                                else:
+                                    st.success(f"✅ 最终动量排位 `{final_score_val:.4f}` > 0.6，极其优秀，成功通过主滤网！")
+                            else:
+                                st.warning("未检测到动量调试数据。")
