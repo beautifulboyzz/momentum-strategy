@@ -16,13 +16,16 @@ st.set_page_config(page_title="Enhanced Dual Momentum - ER Only", layout="wide",
 FONT_FILE = "SimHei.ttf"
 if os.path.exists(FONT_FILE):
     # 核心修复：强制将同目录下的字体注册到 Matplotlib 全局环境
-    fm.fontManager.addfont(FONT_FILE)
-    plt.rcParams['font.sans-serif'] = ['SimHei']
+    try:
+        fm.fontManager.addfont(FONT_FILE)
+        plt.rcParams['font.sans-serif'] = ['SimHei']
+    except Exception as e:
+        pass
     plt.rcParams['axes.unicode_minus'] = False
     my_font = fm.FontProperties(fname=FONT_FILE)
 else:
-    # 兜底方案
-    my_font = fm.FontProperties(family='sans-serif')
+    # 兜底方案修复：直接实例化默认属性，去掉 family 参数，彻底避开解析报错
+    my_font = fm.FontProperties()
     plt.rcParams['axes.unicode_minus'] = False
 
 # --- B. 路径适配 ---
