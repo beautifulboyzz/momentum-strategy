@@ -730,17 +730,25 @@ if st.session_state.get('has_run', False):
                 t1, t2, t3, t4, t5, t6 = st.tabs(["📈 净值曲线", "📊 盈亏分布", "📝 交易日志", "🔬 详细分析", "🧮 公式拆解", "🏅 动量排行透视"])
                 
                 with t1:
-                    fig, ax1 = plt.subplots(figsize=(12, 4.5))
-                    x = res_nav.index
-                    y = res_nav['nav']
-                    ax1.plot(x, y, color='#1f77b4', lw=2, label=f'策略净值 (最终: {y.iloc[-1]:.2f})')
-                    ax1.fill_between(x, y, 1, color='#1f77b4', alpha=0.1)
-                    ax1.axhline(y=1, color='gray', linestyle='--', alpha=0.5)
-                    ax1.set_title(f"趋势动量策略 (纯ER因子)", fontproperties=my_font, fontsize=14)
-                    ax1.legend(prop=my_font)
-                    ax1.grid(True, alpha=0.3)
-                    fig.tight_layout()
-                    st.pyplot(fig)
+                  fig = go.Figure()
+                  fig.add_trace(go.Scatter(
+                      x=res_nav.index, 
+                      y=res_nav['nav'], 
+                      mode='lines', 
+                      name=f'策略净值 (最终: {res_nav["nav"].iloc[-1]:.2f})',
+                      line=dict(color='#1f77b4', width=2),
+                      fill='tozeroy',
+                      fillcolor='rgba(31, 119, 180, 0.1)'
+                  ))
+                  fig.add_hline(y=1.0, line_dash="dash", line_color="gray", opacity=0.5)
+                  fig.update_layout(
+                      title=dict(text="趋势动量策略 (纯ER因子)", font=dict(size=18)),
+                      xaxis_title="",
+                      yaxis_title="净值",
+                      hovermode="x unified",  # 开启丝滑的十字准星交互
+                      margin=dict(l=20, r=20, t=50, b=20)
+                  )
+                  st.plotly_chart(fig, use_container_width=True)
 
                 with t2:
                     if not res_contrib_df.empty:
@@ -826,8 +834,8 @@ if st.session_state.get('has_run', False):
 
                             st.dataframe(
                                 df_debug.style
-                                .applymap(highlight_status, subset=['状态'])
-                                .applymap(color_bool, subset=['核心滤网', '动量滤网'])
+                                .map(highlight_status, subset=['状态'])
+                                .map(color_bool, subset=['核心滤网', '动量滤网'])
                                 .format({
                                     '价格': '{:.2f}',
                                     '综合得分': '{:.4f}',
