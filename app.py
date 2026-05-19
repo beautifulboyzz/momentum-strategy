@@ -15,12 +15,15 @@ st.set_page_config(page_title="Enhanced Dual Momentum - ER Only", layout="wide",
 # --- A. 字体适配 ---
 FONT_FILE = "SimHei.ttf"
 if os.path.exists(FONT_FILE):
-    my_font = fm.FontProperties(fname=FONT_FILE)
+    # 核心修复：强制将同目录下的字体注册到 Matplotlib 全局环境
+    fm.fontManager.addfont(FONT_FILE)
     plt.rcParams['font.sans-serif'] = ['SimHei']
     plt.rcParams['axes.unicode_minus'] = False
+    my_font = fm.FontProperties(fname=FONT_FILE)
 else:
-    my_font = fm.FontProperties(family='SimHei')
-    plt.rcParams['font.sans-serif'] = ['Arial Unicode MS']
+    # 兜底方案
+    my_font = fm.FontProperties(family='sans-serif')
+    plt.rcParams['axes.unicode_minus'] = False
 
 # --- B. 路径适配 ---
 local_absolute_path = r"D:\SAR日频\全部品种日线"
@@ -730,25 +733,17 @@ if st.session_state.get('has_run', False):
                 t1, t2, t3, t4, t5, t6 = st.tabs(["📈 净值曲线", "📊 盈亏分布", "📝 交易日志", "🔬 详细分析", "🧮 公式拆解", "🏅 动量排行透视"])
                 
                 with t1:
-                  fig = go.Figure()
-                  fig.add_trace(go.Scatter(
-                      x=res_nav.index, 
-                      y=res_nav['nav'], 
-                      mode='lines', 
-                      name=f'策略净值 (最终: {res_nav["nav"].iloc[-1]:.2f})',
-                      line=dict(color='#1f77b4', width=2),
-                      fill='tozeroy',
-                      fillcolor='rgba(31, 119, 180, 0.1)'
-                  ))
-                  fig.add_hline(y=1.0, line_dash="dash", line_color="gray", opacity=0.5)
-                  fig.update_layout(
-                      title=dict(text="趋势动量策略 (纯ER因子)", font=dict(size=18)),
-                      xaxis_title="",
-                      yaxis_title="净值",
-                      hovermode="x unified",  # 开启丝滑的十字准星交互
-                      margin=dict(l=20, r=20, t=50, b=20)
-                  )
-                  st.plotly_chart(fig, use_container_width=True)
+                    fig, ax1 = plt.subplots(figsize=(12, 4.5))
+                    x = res_nav.index
+                    y = res_nav['nav']
+                    ax1.plot(x, y, color='#1f77b4', lw=2, label=f'策略净值 (最终: {y.iloc[-1]:.2f})')
+                    ax1.fill_between(x, y, 1, color='#1f77b4', alpha=0.1)
+                    ax1.axhline(y=1, color='gray', linestyle='--', alpha=0.5)
+                    ax1.set_title(f"趋势动量策略 (纯ER因子)", fontproperties=my_font, fontsize=14)
+                    ax1.legend(prop=my_font)
+                    ax1.grid(True, alpha=0.3)
+                    fig.tight_layout()
+                    st.pyplot(fig)
 
                 with t2:
                     if not res_contrib_df.empty:
