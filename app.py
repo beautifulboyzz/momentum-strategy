@@ -8,14 +8,24 @@ import unicodedata
 from datetime import datetime, date
 import re
 import plotly.graph_objects as go
+import urllib.request
 
 # ================= 1. 系统配置 =================
 st.set_page_config(page_title="Enhanced Dual Momentum - ER Only", layout="wide", page_icon="🚀")
 
 # --- A. 字体适配 ---
 FONT_FILE = "SimHei.ttf"
+
+# 如果云端服务器没找到字体，就自动去网上下载一个
+if not os.path.exists(FONT_FILE):
+    try:
+        font_url = "https://raw.githubusercontent.com/StellarCN/scp_zh/master/fonts/SimHei.ttf"
+        urllib.request.urlretrieve(font_url, FONT_FILE)
+    except Exception as e:
+        pass
+
+# 继续原本的加载逻辑
 if os.path.exists(FONT_FILE):
-    # 核心修复：强制将同目录下的字体注册到 Matplotlib 全局环境
     try:
         fm.fontManager.addfont(FONT_FILE)
         plt.rcParams['font.sans-serif'] = ['SimHei']
@@ -24,7 +34,7 @@ if os.path.exists(FONT_FILE):
     plt.rcParams['axes.unicode_minus'] = False
     my_font = fm.FontProperties(fname=FONT_FILE)
 else:
-    # 兜底方案修复：直接实例化默认属性，去掉 family 参数，彻底避开解析报错
+    # 终极兜底防报错
     my_font = fm.FontProperties()
     plt.rcParams['axes.unicode_minus'] = False
 
