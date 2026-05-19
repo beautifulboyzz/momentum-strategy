@@ -884,16 +884,32 @@ if st.session_state.get('has_run', False):
                             try:
                                 p_today = df_p.loc[target_t5_date, target_asset]
 
-                                st.markdown("##### 1. 核心过滤与绝对趋势 (MA & Steady Filter)")
-                                st.markdown("**逻辑**：要求当日收盘价必须严格站上均线。如果开启稳步爬升，还需满足ER效率及波动率条件。")
+                                st.markdown("##### 1. 核心过滤与绝对趋势 (MA & ER Steady Filter)")
+                                st.markdown("**逻辑**：要求当日收盘价必须严格站上均线，同时 ER (趋势效率) 必须大于设定阈值，剔除无序震荡。")
 
+                                # --- 计算 MA ---
                                 ma_win_val = int(ma_win)
                                 past_prices = df_p[target_asset].loc[:target_t5_date].tail(ma_win_val)
                                 ma_val = past_prices.mean()
                                 is_ma_pass = p_today > ma_val
+                                
+                                # --- 计算 ER ---
+                                er_win_val = int(er_win)
+                                er_prices = df_p[target_asset].loc[:target_t5_date].tail(er_win_val + 1)
+                                if len(er_prices) > er_win_val:
+                                    net_change = abs(er_prices.iloc[-1] - er_prices.iloc[0])
+                                    path_length = er_prices.diff().abs().sum()
+                                    er_val = net_change / path_length if path_length != 0 else 0
+                                else:
+                                    net_change, path_length, er_val = 0, 0, 0
+                                is_er_pass = er_val >= er_thresh
 
-                                st.write(
-                                    f"- **均线判定**：当前价格 $P = {p_today:.2f}$，计算出的均线 $MA = {ma_val:.2f}$。判定：**{'✅ 达标' if is_ma_pass else '❌ 破位'}**")
+                                st.latex(r"MA_{" + str(ma_win_val) + r"} = \frac{1}{" + str(ma_win_val) + r"}\sum_{i=0}^{" + str(ma_win_val - 1) + r"} P_{t-i}")
+                                st.write(f"- **均线判定**：当前价格 $P = {p_today:.2f}$，计算出的均线 $MA = {ma_val:.2f}$ ➔ **{'✅ 达标' if is_ma_pass else '❌ 破位 (禁止买入)'}**")
+
+                                st.latex(r"ER = \frac{|P_t - P_{t-n}|}{\sum |P_i - P_{i-1}|}")
+                                st.write(f"- **ER 效率判定**：净位移 `{net_change:.2f}` / 路径总长 `{path_length:.2f}` = 当前效率 **`{er_val:.3f}`**")
+                                st.write(f"- **ER 滤网结果**：`{er_val:.3f} >= 阈值({er_thresh})` ➔ **{'✅ 达标' if is_er_pass else '❌ 震荡过滤 (禁止买入)'}**")
 
                                 st.markdown("---")
 
@@ -902,6 +918,9 @@ if st.session_state.get('has_run', False):
 
                                 p_smooth_series = df_p[target_asset].loc[:target_t5_date].tail(100).rolling(3, min_periods=1).mean()
                                 p_smooth_today = p_smooth_series.iloc[-1]
+
+                                st.latex(r"ROC_n = \frac{P_{smooth\_today} - P_{smooth\_t-n}}{|P_{smooth\_t-n}|}")
+                                st.write(f"*(当前 3日平滑基准价 P_{{smooth}} = {p_smooth_today:.2f})*")
 
                                 pass_count = 0
                                 for p in periods:
@@ -923,19 +942,84 @@ if st.session_state.get('has_run', False):
                                 liq_s = debug_data['liquidity_score'].loc[target_t5_date, target_asset]
                                 final_score = (mom_s * 0.7) + (liq_s * 0.3) if not pd.isna(mom_s) else 0.0
 
-                                st.write(f"- **得分计算**：动量分 `{mom_s:.4f}` * 0.7 + 流动性分 `{liq_s:.4f}` * 0.3 = **`{final_score:.4f}`**")
+                                st.latex(r"Score_{final} = (Mom_{rank} \times 0.7) + (Liq_{rank} \times 0.3)")
+                                st.write(f"- **代入数据**：动量全市场击败了 `{mom_s * 100:.1f}%` 的品种；流动性击败了 `{liq_s * 100:.1f}%` 的品种。")
+                                st.write(f"- **得分计算**：`({mom_s:.4f} * 0.7) + ({liq_s:.4f} * 0.3) = {final_score:.4f}`")
+                                st.write(f"- **排名淘汰**：如果该得分 `<= 0.6`，即使指标全绿也会被强制丢弃！")
 
                                 st.markdown("---")
 
-                                st.markdown("##### 4. 组合分配与最终仓位 (Portfolio Allocation)")
+                                st.markdown("##### 4. 波动率平价与仓位分配 (Risk Parity Weighting)")
+                                st.markdown("**逻辑**：如果该品种入选，其分配到的基础仓位与其自身的波动率成反比。波动越大，买得越少。")
+
+                                atr_norm_val = df_atr_norm.loc[target_t5_date, target_asset]
+                                clipped_vol = max(atr_norm_val, 0.00001)
+                                inv_vol = 1.0 / clipped_vol
+
+                                st.latex(r"Weight_{raw} = \frac{1}{\max(\sigma_{asset}, 0.00001)}")
+                                st.write(f"- **代入数据**：该品种当日 NATR(波动率) 为 `{atr_norm_val * 100:.2f}%`。")
+                                st.write(f"- **计算权重**：倒数权重得分为 `{inv_vol:.2f}`。")
+
+                                st.markdown("##### 5. 组合分配与最终仓位 (Portfolio Allocation)")
 
                                 day_detail_t5 = next((d for d in res_cycle_details if d['date'] == target_t5_date), None)
                                 held_assets_t5 = list(day_detail_t5['next_day_hold'].keys()) if day_detail_t5 else []
 
                                 if target_asset in held_assets_t5:
-                                    st.success(f"🎉 **{target_asset}** 成功闯过所有滤网，入选当日持仓名单！目标仓位：**{day_detail_t5['next_day_hold'][target_asset]*100:.2f}%**")
+                                    st.success(f"🎉 **{target_asset}** 成功闯过所有滤网，入选当日持仓名单！")
+
+                                    with st.expander("💡 点击查看：它是怎么算出这个精确仓位的？(全量数学推导)", expanded=True):
+                                        vols_t5 = df_atr_norm.loc[target_t5_date, held_assets_t5].clip(lower=0.00001)
+                                        inv_vols_t5 = 1.0 / vols_t5
+                                        sum_inv_vols = inv_vols_t5.sum()
+                                        norm_w = inv_vols_t5[target_asset] / sum_inv_vols
+
+                                        pos_mult = debug_data['vol_scaler'].loc[target_t5_date] if 'vol_scaler' in debug_data else 1.0
+                                        target_vol_pct = target_volatility * 100
+                                        market_vol_pct = (target_volatility / pos_mult) * 100 if pos_mult > 0 else 0
+
+                                        scaled_w = norm_w * pos_mult
+                                        final_w = day_detail_t5['next_day_hold'][target_asset]
+
+                                        st.markdown("**第一步：测量个体波动率 (Inverse Volatility)**")
+                                        st.write(f"- `{target_asset}` 的当日波动率 (NATR) 为 **`{vols_t5[target_asset] * 100:.2f}%`**。")
+                                        st.write(f"- 波动越小买越多，取其倒数得到【原始风险权重】：`1 / {vols_t5[target_asset]:.4f}` = **`{inv_vols_t5[target_asset]:.2f}`**。")
+
+                                        st.markdown("**第二步：团队归一化 (切分 100% 基础蛋糕)**")
+                                        st.write(f"- 当日共同入选的 **{len(held_assets_t5)}** 个队友的【原始风险权重】分别是：")
+                                        peer_details = " | ".join([f"{a}: {inv_vols_t5[a]:.2f}" for a in held_assets_t5])
+                                        st.caption(f"  *(队友分值：{peer_details})*")
+                                        st.write(f"- 所有人权重总和 (分母) = **`{sum_inv_vols:.2f}`**")
+                                        st.write(f"- `{target_asset}` 的基础占比 = 自身 `{inv_vols_t5[target_asset]:.2f}` / 分母 `{sum_inv_vols:.2f}` = **`{norm_w * 100:.2f}%`**")
+
+                                        st.markdown("**第三步：大盘杠杆调节 (Target Volatility Scaling)**")
+                                        st.write(f"- 系统侦测到当日大宗商品市场平均波动率约为 **`{market_vol_pct:.2f}%`**。")
+                                        st.write(f"- 设定的总目标波动率为 **`{target_vol_pct:.2f}%`**。")
+                                        if pos_mult >= 1.0:
+                                            st.write(f"- 市场相对平静，计算总杠杆乘数 = `{target_vol_pct:.2f}` / `{market_vol_pct:.2f}` = **`{pos_mult:.2f}`** 倍 (加仓)。")
+                                        else:
+                                            st.write(f"⚠️ **市场风险较高**，计算总杠杆乘数 = `{target_vol_pct:.2f}` / `{market_vol_pct:.2f}` = **`{pos_mult:.2f}`** 倍 (主动降仓避险！)。")
+
+                                        st.write(f"- 乘以杠杆后的【初定目标仓位】 = `{norm_w * 100:.2f}%` × `{pos_mult:.4f}` = **`{scaled_w * 100:.2f}%`**。")
+
+                                        st.markdown("**第四步：50% 天花板与溢出微调 (Spillover Check)**")
+                                        scaled_all = inv_vols_t5 / sum_inv_vols * pos_mult
+                                        overflow_peers = scaled_all[scaled_all > 0.50]
+
+                                        if overflow_peers.empty:
+                                            st.write("➔ ✅ **全员安全**：今天所有队友的初定仓位均未超过 50%。**没有发生资金溢出和强行截断。**")
+                                            st.write(f"➔ 🎯 **最终核定实盘仓位** = 初定仓位 = **`{final_w * 100:.2f}%`**")
+                                        else:
+                                            overflow_str = ", ".join([f"{a}({scaled_all[a] * 100:.1f}%)" for a in overflow_peers.index])
+                                            st.write(f"- 侦测到有队友初定仓位超标：{overflow_str}")
+                                            if abs(final_w - scaled_w) < 0.001:
+                                                st.write(f"➔ ⚖️ **结果**：虽然有队友超标，但 `{target_asset}` 自身未受影响，最终保持为：**`{final_w * 100:.2f}%`**")
+                                            elif final_w < scaled_w:
+                                                st.write(f"➔ ⚠️ **触发截断**：`{target_asset}` 初定仓位 (`{scaled_w * 100:.2f}%`) 超过上限！被强制削减至：**`{final_w * 100:.2f}%`**")
+                                            else:
+                                                st.write(f"➔ 🎁 **获得补贴**：超标的队友被砍掉多余资金，`{target_asset}` 按比例吸纳了溢出资金，膨胀至：**`{final_w * 100:.2f}%`**")
                                 else:
-                                    st.warning(f"🚫 **{target_asset}** 未能入选当日最终的持仓组合。可能由于：1. 截面得分排名不足 2. 触发板块上限限制 3. 基础/动量滤网未达标。当前仓位为 **0%**。")
+                                    st.warning(f"🚫 **{target_asset}** 未能入选当日最终的持仓组合。可能由于：1. 截面得分不足 2. 触发板块上限 3. MA/ER/动量滤网未达标。当前仓位为 **0%**。")
 
                             except Exception as e:
                                 st.error(f"提取底层数据时发生错误 (可能该品种在当前日期停牌或无数据)：{str(e)}")
