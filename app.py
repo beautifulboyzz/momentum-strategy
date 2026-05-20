@@ -93,6 +93,9 @@ CONTRACT_MULTIPLIERS = {
     'IF': 300, 'IH': 300, 'IC': 200, 'IM': 200
 }
 
+# 【优化1】统一转为小写字典，防止大小写匹配遗漏导致乘数为1
+LOWER_MULTIPLIERS = {k.lower(): v for k, v in CONTRACT_MULTIPLIERS.items()}
+
 # --- 恢复板块分类用于持仓上限控制 ---
 SECTOR_DEF = {
     '贵金属': ['au', 'ag'],
@@ -123,11 +126,11 @@ def get_multiplier(asset_name):
     match = re.match(r"([a-zA-Z]+)", asset_name)
     if match:
         code = match.group(1).lower()
-        return CONTRACT_MULTIPLIERS.get(code, 1)
+        return LOWER_MULTIPLIERS.get(code, 1)
     clean_name = asset_name.replace("主连", "").replace("指数", "").replace("连续", "").replace("日线", "").replace(".csv", "").strip()
     code = CN_NAME_MAP.get(clean_name)
     if code:
-        return CONTRACT_MULTIPLIERS.get(code, 1)
+        return LOWER_MULTIPLIERS.get(code.lower(), 1)
     return 1
 
 def read_robust_csv(f):
@@ -143,7 +146,7 @@ def read_robust_csv(f):
                 if c_str in ['最低价', '最低', 'low', 'Low']: rename_map[c] = 'low'
                 if c_str in ['开盘价', '开盘', 'open', 'Open']: rename_map[c] = 'open'
                 if c_str in ['成交量', 'volume', 'Volume', 'vol']: rename_map[c] = 'volume'
-                if c_str in ['成交额', 'amount', 'Amount']: rename_map[c] = 'amount'
+                # 【优化2】彻底删除了读取 CSV 原始 amount 的逻辑，全量强行通过公式重新计算
                 if c_str in ['持仓量', 'open_interest', 'oi']: rename_map[c] = 'open_interest'
             df.rename(columns=rename_map, inplace=True)
             if 'date' in df.columns and 'close' in df.columns:
@@ -184,8 +187,10 @@ def load_data_and_calc_metrics(folder, atr_window=20):
         try:
             df['date'] = pd.to_datetime(df['date'], errors='coerce')
             if 'volume' not in df.columns: df['volume'] = 0
-            if 'amount' not in df.columns:
-                df['amount'] = df['close'] * df['volume'] * multiplier
+            
+            # 【优化3】无论原始数据里有什么，强制用统一公式生成标准绝对成交额
+            df['amount'] = df['close'] * df['volume'] * multiplier
+            
             df.dropna(subset=['date', 'close', 'high', 'low', 'open'], inplace=True)
             df['date'] = df['date'].dt.normalize()
             df.sort_values('date', inplace=True)
@@ -274,6 +279,7 @@ class EnhancedFactors:
     def calculate_volatility_adjustment(df_p, target_vol=0.25):
         returns = df_p.diff() / df_p.shift(1).abs().replace(0, np.nan)
         all_assets_vol = returns.rolling(60, min_periods=20).std() * np.sqrt(252)
+        # 按照用户要求，保留原有的算术平均逻辑
         market_vol_avg = all_assets_vol.mean(axis=1)
         vol_scaler = target_vol / (market_vol_avg + 1e-8)
         return pd.Series(vol_scaler.clip(0.3, 2.0), index=df_p.index)
@@ -942,8 +948,21 @@ if st.session_state.get('has_run', False):
                                 liq_s = debug_data['liquidity_score'].loc[target_t5_date, target_asset]
                                 final_score = (mom_s * 0.7) + (liq_s * 0.3) if not pd.isna(mom_s) else 0.0
 
+                                amount_20d_series = df_amount[target_asset].loc[:target_t5_date].tail(20)
+                                avg_amount = amount_20d_series.mean()
+                                today_amount = df_amount.loc[target_t5_date, target_asset] if target_t5_date in df_amount.index else 0
+                                
+                                def format_money(val):
+                                    if pd.isna(val) or val == 0: return "N/A"
+                                    if val >= 1e8: return f"{val/1e8:.2f} 亿元"
+                                    elif val >= 1e4: return f"{val/1e4:.2f} 万元"
+                                    return f"{val:.2f} 元"
+
+                                st.latex(r"Liq_{20d\_avg} = \frac{1}{20}\sum_{i=0}^{19} Amount_{t-i}")
+                                st.write(f"- **流动性溯源**：`{target_asset}` 当日成交额为 **`{format_money(today_amount)}`**，近 20 日平均成交额为 **`{format_money(avg_amount)}`**。")
+                                
                                 st.latex(r"Score_{final} = (Mom_{rank} \times 0.7) + (Liq_{rank} \times 0.3)")
-                                st.write(f"- **代入数据**：动量全市场击败了 `{mom_s * 100:.1f}%` 的品种；流动性击败了 `{liq_s * 100:.1f}%` 的品种。")
+                                st.write(f"- **代入数据**：动量全市场击败了 `{mom_s * 100:.1f}%` 的品种；流动性 (按20日均额) 击败了 `{liq_s * 100:.1f}%` 的品种。")
                                 st.write(f"- **得分计算**：`({mom_s:.4f} * 0.7) + ({liq_s:.4f} * 0.3) = {final_score:.4f}`")
                                 st.write(f"- **排名淘汰**：如果该得分 `<= 0.6`，即使指标全绿也会被强制丢弃！")
 
