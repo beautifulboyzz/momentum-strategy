@@ -1085,7 +1085,7 @@ if st.session_state.get('has_run', False):
                         df_bh['is_new_wave'] = df_bh.groupby('asset')['date_idx'].diff() != 1
                         df_bh['wave_id'] = df_bh.groupby('asset')['is_new_wave'].cumsum()
                         
-                        # 核心修复：直接记录波段开始和结束的数组下标，根除时间戳匹配漏洞
+                        # 核心记录波段开始和结束的数组下标
                         wave_stats = df_bh.groupby(['asset', 'wave_id']).agg(
                             Start_Date=('date', 'min'),
                             End_Date=('date', 'max'),
@@ -1093,6 +1093,23 @@ if st.session_state.get('has_run', False):
                             End_Idx=('date_idx', 'max'),
                             Hold_Days=('date', 'count')
                         ).reset_index()
+
+                        # 🌟 新增：全局提前计算每个波段的绝对净收益
+                        wave_returns = []
+                        for _, row in wave_stats.iterrows():
+                            a = row['asset']
+                            s_idx = int(row['Start_Idx'])
+                            e_idx = int(row['End_Idx'])
+                            daily_pnls = []
+                            for idx in range(s_idx + 1, e_idx + 2):
+                                if idx < len(res_cycle_details):
+                                    day_ret = res_cycle_details[idx].get('asset_rets', {}).get(a, 0.0)
+                                    daily_pnls.append(day_ret)
+                            wave_pnl = np.prod([1 + r for r in daily_pnls]) - 1 if daily_pnls else 0.0
+                            wave_returns.append(wave_pnl)
+                        
+                        # 将每个波段的收益保存到 df 中
+                        wave_stats['Wave_Return'] = wave_returns
                         
                         # --- C. 计算调仓次数 (按照一进一出算1次) ---
                         trade_events = 0
@@ -1116,13 +1133,19 @@ if st.session_state.get('has_run', False):
                         st.divider()
                         
                         # --- E. 构建左右两张表格的数据源 ---
+                        # 🌟 新增：复利累加单个品种所有波段的总收益
+                        def compound_returns(series):
+                            return np.prod(1 + series) - 1
+
                         asset_profile = wave_stats.groupby('asset').agg(
                             Total_Hold_Days=('Hold_Days', 'sum'),
                             Avg_Hold_Days=('Hold_Days', 'mean'),
                             Max_Hold_Days=('Hold_Days', 'max'),
-                            Total_Waves=('Hold_Days', 'count')
+                            Total_Waves=('Hold_Days', 'count'),
+                            Total_Return=('Wave_Return', compound_returns) # 计算总收益
                         ).reset_index()
-                        asset_profile.columns = ['品种代码', '总持有天数(日)', '平均持仓天数(日)', '单次最长持仓(日)', '回测期间持有次数']
+                        
+                        asset_profile.columns = ['品种代码', '总持有天数(日)', '平均持仓天数(日)', '单次最长持仓(日)', '回测期间持有次数', '持仓期总收益']
                         asset_profile.sort_values(by='总持有天数(日)', ascending=False, inplace=True)
                         
                         wave_print = wave_stats.copy()
@@ -1146,17 +1169,31 @@ if st.session_state.get('has_run', False):
                         
                         st.divider()
                         
-                        # --- G. UI 数据展现 ---
+ # --- G. UI 数据展现 ---
+                        
+                        # 🌟 核心修复：使用 apply 兼容所有 Pandas 版本 (本地 Python 3.7 和云端最新版都能跑)
+                        def color_pnl_col(s):
+                            # 对整列进行遍历着色，红涨绿跌
+                            return [f"color: {'#d62728' if v > 0 else ('#2ca02c' if v < 0 else 'black')}; font-weight: bold;" for v in s]
+
                         sub_col1, sub_col2 = st.columns([1, 1])
                         with sub_col1:
                             st.markdown("#### 📊 各品种持仓时限画像")
                             st.dataframe(
                                 asset_profile.style
-                                .format({'总持有天数(日)': '{:d}', '平均持仓天数(日)': '{:2.1f}', '单次最长持仓(日)': '{:d}', '回测期间持有次数': '{:d}'})
-                                .background_gradient(cmap='YlOrRd', subset=['总持有天数(日)']),
+                                .format({
+                                    '总持有天数(日)': '{:d}', 
+                                    '平均持仓天数(日)': '{:2.1f}', 
+                                    '单次最长持仓(日)': '{:d}', 
+                                    '回测期间持有次数': '{:d}',
+                                    '持仓期总收益': '{:+.2%}'  
+                                })
+                                .background_gradient(cmap='YlOrRd', subset=['总持有天数(日)'])
+                                .apply(color_pnl_col, subset=['持仓期总收益']), # ⬅️ 这里彻底避开了 map/applymap 的版本坑
                                 use_container_width=True,
                                 height=300
                             )
+                            
                             
                         with sub_col2:
                             st.markdown("#### 🔎 连续持仓波段穿透明细流水")
@@ -1170,30 +1207,12 @@ if st.session_state.get('has_run', False):
                         
                         st.divider()
 
-                        # --- H. 渲染底层显微镜复盘面板 (强校验版) ---
+                        # --- H. 渲染底层显微镜复盘面板 (高效精简版) ---
                         if selected_asset and not asset_waves.empty:
                             
-                            # 第一步：基于严格的数组下标，穿透计算累计收益
-                            total_asset_pnl_compounded = 1.0
-                            wave_pnl_list = []
+                            # 直接从刚刚做好的汇总表里提取最终收益，不重复计算
+                            final_total_pnl = asset_profile[asset_profile['品种代码'] == selected_asset]['持仓期总收益'].iloc[0]
                             
-                            for _, target_wave in asset_waves.iterrows():
-                                start_idx = int(target_wave['Start_Idx'])
-                                end_idx = int(target_wave['End_Idx'])
-                                
-                                wave_daily_pnls = []
-                                # 收盘买入，次日开始产生收益。所以提取范围是 start_idx+1 到 end_idx+1 (Python range上限要+2)
-                                for idx in range(start_idx + 1, end_idx + 2):
-                                    if idx < len(res_cycle_details):
-                                        # 系统源码中 daily_asset_rets 已经完整包含当天正常收盘涨跌或触发止损的斩仓涨跌，直接取值即可
-                                        day_ret = res_cycle_details[idx].get('asset_rets', {}).get(selected_asset, 0.0)
-                                        wave_daily_pnls.append(day_ret)
-                                
-                                single_wave_pnl = np.prod([1 + r for r in wave_daily_pnls]) - 1 if wave_daily_pnls else 0.0
-                                wave_pnl_list.append(single_wave_pnl)
-                                total_asset_pnl_compounded *= (1 + single_wave_pnl)
-                            
-                            final_total_pnl = total_asset_pnl_compounded - 1
                             pnl_color = "#d62728" if final_total_pnl >= 0 else "#2ca02c"
                             pnl_sign = "+" if final_total_pnl >= 0 else ""
                             
@@ -1207,14 +1226,14 @@ if st.session_state.get('has_run', False):
                             st.caption(f"共计发现 {len(asset_waves)} 次独立持仓波段，以下为您穿透每一次波段的日内损益与最终离场诱因：")
                             
                             for wave_idx, (_, target_wave) in enumerate(asset_waves.iterrows()):
-                                # 直接使用下标，不再受日期跳空和格式影响
                                 end_idx = int(target_wave['End_Idx'])
                                 w_start = target_wave['Start_Date']
                                 w_end = target_wave['End_Date']
                                 w_days = target_wave['Hold_Days']
                                 wave_id = target_wave['wave_id']
                                 
-                                current_wave_pnl = wave_pnl_list[wave_idx]
+                                # 直接读取全局预先计算好的单个波段收益
+                                current_wave_pnl = target_wave['Wave_Return']
                                 wave_pnl_sign = "+" if current_wave_pnl >= 0 else ""
                                 wave_pnl_color = "#d62728" if current_wave_pnl >= 0 else "#2ca02c"
                                 
