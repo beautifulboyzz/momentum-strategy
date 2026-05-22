@@ -13,7 +13,7 @@ import plotly.graph_objects as go
 st.set_page_config(page_title="Enhanced Dual Momentum - ER Only", layout="wide", page_icon="🚀")
 
 # --- A. 字体适配 ---
-FONT_FILE = "SimHei.ttf"
+FONT_FILE = "Ubuntu_18.04_SimHei.ttf"
 if os.path.exists(FONT_FILE):
     my_font = fm.FontProperties(fname=FONT_FILE)
     plt.rcParams['font.sans-serif'] = ['SimHei']
@@ -826,8 +826,8 @@ if st.session_state.get('has_run', False):
 
                             st.dataframe(
                                 df_debug.style
-                                .applymap(highlight_status, subset=['状态'])
-                                .applymap(color_bool, subset=['核心滤网', '动量滤网'])
+                                .map(highlight_status, subset=['状态'])
+                                .map(color_bool, subset=['核心滤网', '动量滤网'])
                                 .format({
                                     '价格': '{:.2f}',
                                     '综合得分': '{:.4f}',
