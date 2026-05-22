@@ -8,38 +8,22 @@ import unicodedata
 from datetime import datetime, date
 import re
 import plotly.graph_objects as go
-import urllib.request
 
 # ================= 1. 系统配置 =================
 st.set_page_config(page_title="Enhanced Dual Momentum - ER Only", layout="wide", page_icon="🚀")
 
 # --- A. 字体适配 ---
 FONT_FILE = "SimHei.ttf"
-
-# 如果云端服务器没找到字体，就自动去网上下载一个
-if not os.path.exists(FONT_FILE):
-    try:
-        font_url = "https://raw.githubusercontent.com/StellarCN/scp_zh/master/fonts/SimHei.ttf"
-        urllib.request.urlretrieve(font_url, FONT_FILE)
-    except Exception as e:
-        pass
-
-# 继续原本的加载逻辑
 if os.path.exists(FONT_FILE):
-    try:
-        fm.fontManager.addfont(FONT_FILE)
-        plt.rcParams['font.sans-serif'] = ['SimHei']
-    except Exception as e:
-        pass
-    plt.rcParams['axes.unicode_minus'] = False
     my_font = fm.FontProperties(fname=FONT_FILE)
-else:
-    # 终极兜底防报错
-    my_font = fm.FontProperties()
+    plt.rcParams['font.sans-serif'] = ['SimHei']
     plt.rcParams['axes.unicode_minus'] = False
+else:
+    my_font = fm.FontProperties(family='SimHei')
+    plt.rcParams['font.sans-serif'] = ['Arial Unicode MS']
 
 # --- B. 路径适配 ---
-local_absolute_path = r"D:\SAR日频\全部品种日线"
+local_absolute_path = r"D:\全市场品种"
 relative_path = "data"
 
 if os.path.exists(local_absolute_path):
@@ -93,9 +77,6 @@ CONTRACT_MULTIPLIERS = {
     'IF': 300, 'IH': 300, 'IC': 200, 'IM': 200
 }
 
-# 【优化1】统一转为小写字典，防止大小写匹配遗漏导致乘数为1
-LOWER_MULTIPLIERS = {k.lower(): v for k, v in CONTRACT_MULTIPLIERS.items()}
-
 # --- 恢复板块分类用于持仓上限控制 ---
 SECTOR_DEF = {
     '贵金属': ['au', 'ag'],
@@ -126,11 +107,11 @@ def get_multiplier(asset_name):
     match = re.match(r"([a-zA-Z]+)", asset_name)
     if match:
         code = match.group(1).lower()
-        return LOWER_MULTIPLIERS.get(code, 1)
+        return CONTRACT_MULTIPLIERS.get(code, 1)
     clean_name = asset_name.replace("主连", "").replace("指数", "").replace("连续", "").replace("日线", "").replace(".csv", "").strip()
     code = CN_NAME_MAP.get(clean_name)
     if code:
-        return LOWER_MULTIPLIERS.get(code.lower(), 1)
+        return CONTRACT_MULTIPLIERS.get(code, 1)
     return 1
 
 def read_robust_csv(f):
@@ -146,7 +127,7 @@ def read_robust_csv(f):
                 if c_str in ['最低价', '最低', 'low', 'Low']: rename_map[c] = 'low'
                 if c_str in ['开盘价', '开盘', 'open', 'Open']: rename_map[c] = 'open'
                 if c_str in ['成交量', 'volume', 'Volume', 'vol']: rename_map[c] = 'volume'
-                # 【优化2】彻底删除了读取 CSV 原始 amount 的逻辑，全量强行通过公式重新计算
+                if c_str in ['成交额', 'amount', 'Amount']: rename_map[c] = 'amount'
                 if c_str in ['持仓量', 'open_interest', 'oi']: rename_map[c] = 'open_interest'
             df.rename(columns=rename_map, inplace=True)
             if 'date' in df.columns and 'close' in df.columns:
@@ -187,10 +168,8 @@ def load_data_and_calc_metrics(folder, atr_window=20):
         try:
             df['date'] = pd.to_datetime(df['date'], errors='coerce')
             if 'volume' not in df.columns: df['volume'] = 0
-            
-            # 【优化3】无论原始数据里有什么，强制用统一公式生成标准绝对成交额
-            df['amount'] = df['close'] * df['volume'] * multiplier
-            
+            if 'amount' not in df.columns:
+                df['amount'] = df['close'] * df['volume'] * multiplier
             df.dropna(subset=['date', 'close', 'high', 'low', 'open'], inplace=True)
             df['date'] = df['date'].dt.normalize()
             df.sort_values('date', inplace=True)
@@ -279,7 +258,6 @@ class EnhancedFactors:
     def calculate_volatility_adjustment(df_p, target_vol=0.25):
         returns = df_p.diff() / df_p.shift(1).abs().replace(0, np.nan)
         all_assets_vol = returns.rolling(60, min_periods=20).std() * np.sqrt(252)
-        # 按照用户要求，保留原有的算术平均逻辑
         market_vol_avg = all_assets_vol.mean(axis=1)
         vol_scaler = target_vol / (market_vol_avg + 1e-8)
         return pd.Series(vol_scaler.clip(0.3, 2.0), index=df_p.index)
@@ -749,7 +727,7 @@ if st.session_state.get('has_run', False):
                 col7.metric("胜率", f"{win_rate:.1f}%")
                 col8.metric("交易天数", f"{len(res_nav)}")
 
-                t1, t2, t3, t4, t5, t6 = st.tabs(["📈 净值曲线", "📊 盈亏分布", "📝 交易日志", "🔬 详细分析", "🧮 公式拆解", "🏅 动量排行透视"])
+                t1, t2, t3, t4, t5, t6, t7 = st.tabs(["📈 净值曲线", "📊 盈亏分布", "📝 交易日志", "🔬 详细分析", "🧮 公式拆解", "🏅 动量排行透视", "⏱️ 持仓周期分析"])
                 
                 with t1:
                     fig, ax1 = plt.subplots(figsize=(12, 4.5))
@@ -758,7 +736,7 @@ if st.session_state.get('has_run', False):
                     ax1.plot(x, y, color='#1f77b4', lw=2, label=f'策略净值 (最终: {y.iloc[-1]:.2f})')
                     ax1.fill_between(x, y, 1, color='#1f77b4', alpha=0.1)
                     ax1.axhline(y=1, color='gray', linestyle='--', alpha=0.5)
-                    ax1.set_title(f"趋势动量策略 (纯ER因子)", fontproperties=my_font, fontsize=14)
+                    ax1.set_title(f"趋势动量策略 日频", fontproperties=my_font, fontsize=14)
                     ax1.legend(prop=my_font)
                     ax1.grid(True, alpha=0.3)
                     fig.tight_layout()
@@ -848,8 +826,8 @@ if st.session_state.get('has_run', False):
 
                             st.dataframe(
                                 df_debug.style
-                                .map(highlight_status, subset=['状态'])
-                                .map(color_bool, subset=['核心滤网', '动量滤网'])
+                                .applymap(highlight_status, subset=['状态'])
+                                .applymap(color_bool, subset=['核心滤网', '动量滤网'])
                                 .format({
                                     '价格': '{:.2f}',
                                     '综合得分': '{:.4f}',
@@ -948,21 +926,8 @@ if st.session_state.get('has_run', False):
                                 liq_s = debug_data['liquidity_score'].loc[target_t5_date, target_asset]
                                 final_score = (mom_s * 0.7) + (liq_s * 0.3) if not pd.isna(mom_s) else 0.0
 
-                                amount_20d_series = df_amount[target_asset].loc[:target_t5_date].tail(20)
-                                avg_amount = amount_20d_series.mean()
-                                today_amount = df_amount.loc[target_t5_date, target_asset] if target_t5_date in df_amount.index else 0
-                                
-                                def format_money(val):
-                                    if pd.isna(val) or val == 0: return "N/A"
-                                    if val >= 1e8: return f"{val/1e8:.2f} 亿元"
-                                    elif val >= 1e4: return f"{val/1e4:.2f} 万元"
-                                    return f"{val:.2f} 元"
-
-                                st.latex(r"Liq_{20d\_avg} = \frac{1}{20}\sum_{i=0}^{19} Amount_{t-i}")
-                                st.write(f"- **流动性溯源**：`{target_asset}` 当日成交额为 **`{format_money(today_amount)}`**，近 20 日平均成交额为 **`{format_money(avg_amount)}`**。")
-                                
                                 st.latex(r"Score_{final} = (Mom_{rank} \times 0.7) + (Liq_{rank} \times 0.3)")
-                                st.write(f"- **代入数据**：动量全市场击败了 `{mom_s * 100:.1f}%` 的品种；流动性 (按20日均额) 击败了 `{liq_s * 100:.1f}%` 的品种。")
+                                st.write(f"- **代入数据**：动量全市场击败了 `{mom_s * 100:.1f}%` 的品种；流动性击败了 `{liq_s * 100:.1f}%` 的品种。")
                                 st.write(f"- **得分计算**：`({mom_s:.4f} * 0.7) + ({liq_s:.4f} * 0.3) = {final_score:.4f}`")
                                 st.write(f"- **排名淘汰**：如果该得分 `<= 0.6`，即使指标全绿也会被强制丢弃！")
 
@@ -1088,3 +1053,224 @@ if st.session_state.get('has_run', False):
                                 )
                             else:
                                 st.warning("未检测到动量调试数据。")
+
+            with t7:
+                st.markdown("### ⏱️ 品种持仓周期统计面板")
+                st.caption("基于回测每日实盘留存仓位，穿透计算各个品种的【单次连续持仓天数】及【历史平均生命周期】。")
+
+                if not res_cycle_details:
+                    st.warning("暂无每日持仓细节数据，无法计算持仓周期。")
+                else:
+                    # --- A. 基础数据准备：抽取每日持仓矩阵 ---
+                    history_records = []
+                    for day in res_cycle_details:
+                        d_date = day['date']
+                        helds = day.get('next_day_hold', {})
+                        for asset, w in helds.items():
+                            if w > 0:
+                                history_records.append({'date': d_date, 'asset': asset})
+                    
+                    if not history_records:
+                        st.info("回测期间未发生任何实际持仓买入行为。")
+                    else:
+                        df_bh = pd.DataFrame(history_records)
+                        df_bh.sort_values(['asset', 'date'], inplace=True)
+                        
+                        # 获取回测总日历绝对下标映射
+                        all_backtest_dates = sorted(list(res_nav.index))
+                        date_to_idx = {d: idx for idx, d in enumerate(all_backtest_dates)}
+                        df_bh['date_idx'] = df_bh['date'].map(date_to_idx)
+                        
+                        # --- B. 计算连续持仓波段 (包含绝对 Index) ---
+                        df_bh['is_new_wave'] = df_bh.groupby('asset')['date_idx'].diff() != 1
+                        df_bh['wave_id'] = df_bh.groupby('asset')['is_new_wave'].cumsum()
+                        
+                        # 核心修复：直接记录波段开始和结束的数组下标，根除时间戳匹配漏洞
+                        wave_stats = df_bh.groupby(['asset', 'wave_id']).agg(
+                            Start_Date=('date', 'min'),
+                            End_Date=('date', 'max'),
+                            Start_Idx=('date_idx', 'min'),
+                            End_Idx=('date_idx', 'max'),
+                            Hold_Days=('date', 'count')
+                        ).reset_index()
+                        
+                        # --- C. 计算调仓次数 (按照一进一出算1次) ---
+                        trade_events = 0
+                        for idx, day in enumerate(res_cycle_details):
+                            curr_holds = {a for a, w in day.get('next_day_hold', {}).items() if w > 0}
+                            if idx == 0:
+                                trade_events += len(curr_holds)
+                            else:
+                                prev_day = res_cycle_details[idx-1]
+                                prev_holds = {a for a, w in prev_day.get('next_day_hold', {}).items() if w > 0}
+                                assets_in = curr_holds.difference(prev_holds)
+                                assets_out = prev_holds.difference(curr_holds)
+                                trade_events += max(len(assets_in), len(assets_out))
+
+                        # --- D. 顶层大盘指标卡 ---
+                        total_avg_hold = wave_stats['Hold_Days'].mean()
+                        m_col1, m_col2 = st.columns(2)
+                        m_col1.metric("⚖️ 全市场平均持仓期", f"{total_avg_hold:.1f} 个交易日")
+                        m_col2.metric("🔄 发生的总调仓次数", f"{trade_events} 次")
+                        
+                        st.divider()
+                        
+                        # --- E. 构建左右两张表格的数据源 ---
+                        asset_profile = wave_stats.groupby('asset').agg(
+                            Total_Hold_Days=('Hold_Days', 'sum'),
+                            Avg_Hold_Days=('Hold_Days', 'mean'),
+                            Max_Hold_Days=('Hold_Days', 'max'),
+                            Total_Waves=('Hold_Days', 'count')
+                        ).reset_index()
+                        asset_profile.columns = ['品种代码', '总持有天数(日)', '平均持仓天数(日)', '单次最长持仓(日)', '回测期间持有次数']
+                        asset_profile.sort_values(by='总持有天数(日)', ascending=False, inplace=True)
+                        
+                        wave_print = wave_stats.copy()
+                        wave_print['Start_Date_Show'] = wave_print['Start_Date'].dt.date
+                        wave_print['End_Date_Show'] = wave_print['End_Date'].dt.date
+                        wave_print.rename(columns={
+                            'asset': '品种代码', 'Start_Date_Show': '进场日期', 
+                            'End_Date_Show': '清仓离场日', 'Hold_Days': '连续持有天数'
+                        }, inplace=True)
+                        wave_print = wave_print[['品种代码', '进场日期', '清仓离场日', '连续持有天数']]
+                        wave_print.sort_values(by='进场日期', ascending=False, inplace=True)
+                        
+                        # --- F. 核心交互选择器 ---
+                        st.markdown("#### 🔍 穿透式复盘筛选器")
+                        available_assets_list = sorted(asset_profile['品种代码'].unique().tolist())
+                        
+                        selected_asset = st.selectbox("🎯 选择要复盘的品种代码 (下方将自动展开其所有历史持仓波段及收益统计):", options=available_assets_list)
+                        
+                        asset_waves = wave_stats[wave_stats['asset'] == selected_asset].copy()
+                        asset_waves.sort_values(by='Start_Date', ascending=False, inplace=True)
+                        
+                        st.divider()
+                        
+                        # --- G. UI 数据展现 ---
+                        sub_col1, sub_col2 = st.columns([1, 1])
+                        with sub_col1:
+                            st.markdown("#### 📊 各品种持仓时限画像")
+                            st.dataframe(
+                                asset_profile.style
+                                .format({'总持有天数(日)': '{:d}', '平均持仓天数(日)': '{:2.1f}', '单次最长持仓(日)': '{:d}', '回测期间持有次数': '{:d}'})
+                                .background_gradient(cmap='YlOrRd', subset=['总持有天数(日)']),
+                                use_container_width=True,
+                                height=300
+                            )
+                            
+                        with sub_col2:
+                            st.markdown("#### 🔎 连续持仓波段穿透明细流水")
+                            st.dataframe(
+                                wave_print.style
+                                .format({'连续持有天数': '{:d}'})
+                                .bar(subset=['连续持有天数'], color='#a6c8e0'),
+                                use_container_width=True,
+                                height=300
+                            )
+                        
+                        st.divider()
+
+                        # --- H. 渲染底层显微镜复盘面板 (强校验版) ---
+                        if selected_asset and not asset_waves.empty:
+                            
+                            # 第一步：基于严格的数组下标，穿透计算累计收益
+                            total_asset_pnl_compounded = 1.0
+                            wave_pnl_list = []
+                            
+                            for _, target_wave in asset_waves.iterrows():
+                                start_idx = int(target_wave['Start_Idx'])
+                                end_idx = int(target_wave['End_Idx'])
+                                
+                                wave_daily_pnls = []
+                                # 收盘买入，次日开始产生收益。所以提取范围是 start_idx+1 到 end_idx+1 (Python range上限要+2)
+                                for idx in range(start_idx + 1, end_idx + 2):
+                                    if idx < len(res_cycle_details):
+                                        # 系统源码中 daily_asset_rets 已经完整包含当天正常收盘涨跌或触发止损的斩仓涨跌，直接取值即可
+                                        day_ret = res_cycle_details[idx].get('asset_rets', {}).get(selected_asset, 0.0)
+                                        wave_daily_pnls.append(day_ret)
+                                
+                                single_wave_pnl = np.prod([1 + r for r in wave_daily_pnls]) - 1 if wave_daily_pnls else 0.0
+                                wave_pnl_list.append(single_wave_pnl)
+                                total_asset_pnl_compounded *= (1 + single_wave_pnl)
+                            
+                            final_total_pnl = total_asset_pnl_compounded - 1
+                            pnl_color = "#d62728" if final_total_pnl >= 0 else "#2ca02c"
+                            pnl_sign = "+" if final_total_pnl >= 0 else ""
+                            
+                            st.markdown(
+                                f"### 🔬 【{selected_asset}】历史全波段复盘显微镜 "
+                                f"<span style='font-size:20px; margin-left:15px; padding:4px 10px; background-color:#f1f3f6; border-radius:6px; color:{pnl_color}; font-weight:bold;'>"
+                                f"所有波段累计净收益: {pnl_sign}{final_total_pnl*100:.2f}%"
+                                f"</span>", 
+                                unsafe_allow_html=True
+                            )
+                            st.caption(f"共计发现 {len(asset_waves)} 次独立持仓波段，以下为您穿透每一次波段的日内损益与最终离场诱因：")
+                            
+                            for wave_idx, (_, target_wave) in enumerate(asset_waves.iterrows()):
+                                # 直接使用下标，不再受日期跳空和格式影响
+                                end_idx = int(target_wave['End_Idx'])
+                                w_start = target_wave['Start_Date']
+                                w_end = target_wave['End_Date']
+                                w_days = target_wave['Hold_Days']
+                                wave_id = target_wave['wave_id']
+                                
+                                current_wave_pnl = wave_pnl_list[wave_idx]
+                                wave_pnl_sign = "+" if current_wave_pnl >= 0 else ""
+                                wave_pnl_color = "#d62728" if current_wave_pnl >= 0 else "#2ca02c"
+                                
+                                reason_str = "正常截面动量轮动淘汰（综合得分跌出池子或被更优品种替换）"
+                                border_color = "#1f77b4" 
+                                exit_day_ret_str = ""
+                                actual_exit_date_str = "未知 (持仓直到回测期末尾)"
+                                
+                                # 锁定实际清仓日：持有期的最后一天 (end_idx) 的下一个自然交易日
+                                if end_idx + 1 < len(res_cycle_details):
+                                    exit_day_detail = res_cycle_details[end_idx + 1]
+                                    actual_exit_date_str = exit_day_detail['date'].strftime('%Y-%m-%d')
+                                    
+                                    day_stops = exit_day_detail.get('stops', [])
+                                    my_stop = next((s for s in day_stops if s['asset'] == selected_asset), None)
+                                    
+                                    if my_stop:
+                                        reason_str = f"🚨 盘中触发止损：{my_stop['reason']}"
+                                        border_color = "#d62728" 
+                                        if 'ret' in my_stop:
+                                            exit_day_ret_str = f"{my_stop['ret']*100:+.2f}% (止损斩仓表现)"
+                                    else:
+                                        asset_rets = exit_day_detail.get('asset_rets', {})
+                                        if selected_asset in asset_rets:
+                                            exit_day_ret_str = f"{asset_rets[selected_asset]*100:+.2f}% (离场当日正常涨跌)"
+                                
+                                pnl_display = f"🌟 波段区间累计收益: {wave_pnl_sign}{current_wave_pnl*100:.2f}%"
+                                if exit_day_ret_str:
+                                    pnl_display += f"<br>📉 离场当日独立表现: {exit_day_ret_str}"
+
+                                with st.container():
+                                    st.markdown(f"#### 🌊 波段 {wave_id}")
+                                    
+                                    c1, c2, c3 = st.columns(3)
+                                    c1.markdown(f"**🟢 进场建仓日**：`{w_start.strftime('%Y-%m-%d')}`")
+                                    c2.markdown(f"**🔴 实际清仓日**：`{actual_exit_date_str}`") 
+                                    c3.markdown(f"**⏱️ 连续持有天数**：`{w_days} 个交易日`")
+                                    
+                                    d_col1, d_col2 = st.columns([1, 2])
+                                    with d_col1:
+                                        st.markdown(
+                                            f"<div style='padding:12px; background-color:#f1f3f6; border-left:5px solid {border_color}; border-radius:4px; height: 100%;'>"
+                                            f"<b>📈 盈亏综合表现:</b><br/>"
+                                            f"<span style='color:{wave_pnl_color}; font-size:15px; font-weight:bold;'>{pnl_display}</span>"
+                                            f"</div>", 
+                                            unsafe_allow_html=True
+                                        )
+                                    with d_col2:
+                                        w_style = "color:#856404;" if border_color != "#d62728" else "color:#d62728;"
+                                        b_style = "background-color:#fff3cd;" if border_color != "#d62728" else "background-color:#f8d7da;"
+                                        st.markdown(
+                                            f"<div style='padding:12px; {b_style} border-left:5px solid {border_color}; border-radius:4px; height: 100%;'>"
+                                            f"<b>❓ 卖出离场诱因诊断:</b><br/>"
+                                            f"<span style='{w_style} font-size:14px; font-weight:bold;'>{reason_str}</span>"
+                                            f"</div>", 
+                                            unsafe_allow_html=True
+                                        )
+                                    st.write("") 
+                                    st.divider()
